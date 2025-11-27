@@ -17,6 +17,8 @@ import shutil
 import json
 import ipaddr
 import modules.cloud_config as cloud_config
+from modules.provider_registry import ProviderConfig
+
 
 # Create Tempdir and Module Cache Directories
 annotations = dict()
@@ -28,7 +30,9 @@ os.environ["TF_DATA_DIR"] = temp_dir.name
 abspath = os.path.abspath(__file__)
 dname = os.path.dirname(abspath)
 MODULE_DIR = str(Path(Path.home(), ".terravision", "module_cache"))
-REVERSE_ARROW_LIST = cloud_config.AWS_REVERSE_ARROW_LIST
+# REVERSE_ARROW_LIST = cloud_config.AWS_CLOUD_CONFIG["REVERSE_ARROW_LIST"] # This will be accessed via provider_config
+
+
 
 
 def tf_initplan(
@@ -378,11 +382,13 @@ def find_node_in_gvid_table(node: str, gvid_table: List[str]) -> int:
     exit()
 
 
-def tf_makegraph(tfdata: Dict[str, Any], debug: bool) -> Dict[str, Any]:
+def tf_makegraph(tfdata: Dict[str, Any], debug: bool, provider_config: ProviderConfig) -> Dict[str, Any]:
     """Build resource dependency graph from terraform graph output.
 
     Args:
         tfdata: Terraform data dictionary with plan and graph data
+        debug: Whether to enable debug output
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with populated graphdict connections
@@ -432,7 +438,7 @@ def tf_makegraph(tfdata: Dict[str, Any], debug: bool) -> Dict[str, Any]:
                     ):
                         conn = matched_connections[0]
                     # Handle reverse arrow resources (connection points to node)
-                    if conn_type in REVERSE_ARROW_LIST:
+                    if conn_type in provider_config["config"]["REVERSE_ARROW_LIST"]:
                         if conn not in tfdata["graphdict"].keys():
                             tfdata["graphdict"][conn] = list()
                         # Skip multi-instance resources
@@ -448,10 +454,15 @@ def tf_makegraph(tfdata: Dict[str, Any], debug: bool) -> Dict[str, Any]:
     tfdata["original_graphdict"] = copy.deepcopy(tfdata["graphdict"])
     tfdata["original_metadata"] = copy.deepcopy(tfdata["meta_data"])
     # Verify cloud resources exist
-    if len(helpers.list_of_dictkeys_containing(tfdata["graphdict"], "aws_")) == 0:
+    resource_found = False
+    for prefix in provider_config["resource_prefixes"]:
+        if len(helpers.list_of_dictkeys_containing(tfdata["graphdict"], prefix)) > 0:
+            resource_found = True
+            break
+    if not resource_found:
         click.echo(
             click.style(
-                f"\nERROR: No AWS, Azure or Google resources will be created with current plan. Exiting.",
+                f"\nERROR: No {provider_config['name'].upper()} resources will be created with current plan. Exiting.",
                 fg="red",
                 bold=True,
             )

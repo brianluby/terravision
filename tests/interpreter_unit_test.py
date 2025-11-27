@@ -12,6 +12,7 @@ from modules.interpreter import (
     handle_implied_resources,
     handle_numbered_nodes,
 )
+from modules.provider_registry import AWS_PROVIDER_CONFIG
 
 
 class TestExtractLocals(unittest.TestCase):
@@ -85,7 +86,7 @@ class TestHandleImpliedResources(unittest.TestCase):
         tfdata = {"node_list": [], "graphdict": {}}
         meta_data = {}
         result_meta, result_tfdata = handle_implied_resources(
-            item, "aws_iam_policy", "test", tfdata, meta_data
+            item, "aws_iam_policy", "test", tfdata, meta_data, AWS_PROVIDER_CONFIG
         )
         self.assertIn("aws_cloudwatch_log_group.logs", result_tfdata["node_list"])
 
@@ -94,7 +95,7 @@ class TestHandleImpliedResources(unittest.TestCase):
         tfdata = {"node_list": [], "graphdict": {}}
         meta_data = {}
         result_meta, result_tfdata = handle_implied_resources(
-            item, "aws_s3_bucket", "test", tfdata, meta_data
+            item, "aws_s3_bucket", "test", tfdata, meta_data, AWS_PROVIDER_CONFIG
         )
         self.assertEqual(len(result_tfdata["node_list"]), 0)
 

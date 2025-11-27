@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 import requests
+from typing import Dict, List, Any, Tuple
 
 import click
 
@@ -18,6 +19,7 @@ import modules.interpreter as interpreter
 import modules.tfwrapper as tfwrapper
 import modules.cloud_config as cloud_config
 import modules.resource_handlers as resource_handlers
+from modules.provider_registry import ProviderConfig, detect_providers, get_primary_provider
 
 
 __version__ = "0.8"
@@ -73,10 +75,26 @@ def _load_json_source(source: str):
 
 
 def _process_terraform_source(
-    source: list, varfile: list, workspace: str, annotate: str, debug: bool
-):
+    source: list, varfile: list, workspace: str, annotate: str, debug: bool, tfdata: dict = None
+) -> Tuple[Dict[str, Any], ProviderConfig]:
+    if tfdata is None:
+        tfdata = {}
     tfdata = tfwrapper.tf_initplan(source, varfile, workspace, debug)
-    tfdata = tfwrapper.tf_makegraph(tfdata, debug)
+    
+    # Provider Detection and Selection
+    detected_providers = detect_providers(tfdata)
+    if not detected_providers:
+        click.echo(
+            click.style(
+                f"\nERROR: No supported cloud provider resources found in Terraform plan.",
+                fg="red",
+                bold=True,
+            )
+        )
+        sys.exit(1)
+    primary_provider = get_primary_provider(detected_providers, tfdata)
+
+    tfdata = tfwrapper.tf_makegraph(tfdata, debug, primary_provider) # Pass primary_provider
     codepath = (
         [tfdata["codepath"]]
         if isinstance(tfdata["codepath"], str)
@@ -85,22 +103,22 @@ def _process_terraform_source(
     tfdata = fileparser.read_tfsource(codepath, varfile, annotate, tfdata)
     if debug:
         helpers.export_tfdata(tfdata)
-    return tfdata
+    return tfdata, primary_provider
 
 
-def _enrich_graph_data(tfdata: dict, debug: bool, already_processed: bool) -> dict:
+def _enrich_graph_data(tfdata: dict, debug: bool, already_processed: bool, provider_config: ProviderConfig) -> dict:
     tfdata = interpreter.prefix_module_names(tfdata)
-    tfdata = interpreter.resolve_all_variables(tfdata, debug, already_processed)
-    tfdata = resource_handlers.handle_special_cases(tfdata)
-    tfdata = graphmaker.add_relations(tfdata)
-    tfdata = graphmaker.consolidate_nodes(tfdata)
-    tfdata = annotations.add_annotations(tfdata)
-    tfdata = graphmaker.handle_special_resources(tfdata)
-    tfdata = graphmaker.handle_variants(tfdata)
-    tfdata = graphmaker.create_multiple_resources(tfdata)
-    tfdata = graphmaker.reverse_relations(tfdata)
+    tfdata = interpreter.resolve_all_variables(tfdata, debug, already_processed, provider_config)
+    tfdata = resource_handlers.handle_special_cases(tfdata, provider_config)
+    tfdata = graphmaker.add_relations(tfdata, provider_config)
+    tfdata = graphmaker.consolidate_nodes(tfdata, provider_config)
+    tfdata = annotations.add_annotations(tfdata, provider_config)
+    tfdata = graphmaker.handle_special_resources(tfdata, provider_config)
+    tfdata = graphmaker.handle_variants(tfdata, provider_config)
+    tfdata = graphmaker.create_multiple_resources(tfdata, provider_config)
+    tfdata = graphmaker.reverse_relations(tfdata, provider_config)
     tfdata = helpers.remove_recursive_links(tfdata)
-    tfdata = resource_handlers.match_resources(tfdata)
+    tfdata = resource_handlers.match_resources(tfdata, provider_config)
 
     return tfdata
 
@@ -112,7 +130,7 @@ def _print_graph_debug(outputdict: dict, title: str):
 
 def compile_tfdata(
     source: list, varfile: list, workspace: str, debug: bool, annotate=""
-):
+) -> Tuple[Dict[str, Any], ProviderConfig]:
     """Compile Terraform data from source files into enriched graph dictionary.
 
     Args:
@@ -123,23 +141,34 @@ def compile_tfdata(
         annotate: Path to custom annotations YAML file
 
     Returns:
-        dict: Enriched tfdata dictionary with graphdict and metadata
+        tuple: (Enriched tfdata dictionary with graphdict and metadata, Primary ProviderConfig)
     """
     _validate_source(source)
     already_processed = False
+    tfdata = {}
     if source[0].endswith(".json"):
         tfdata = _load_json_source(source[0])
         already_processed = True
         if "all_resource" not in tfdata:
             _print_graph_debug(tfdata["graphdict"], "Loaded JSON graphviz dictionary")
+        # For JSON source, we still need to determine the provider
+        detected_providers = detect_providers(tfdata)
+        if not detected_providers:
+            # Fallback to AWS provider config if nothing detected
+            # This handles cases where JSON source may not contain enough info for detection
+            from modules.provider_registry import AWS_PROVIDER_CONFIG
+            primary_provider = AWS_PROVIDER_CONFIG
+        else:
+            primary_provider = get_primary_provider(detected_providers, tfdata)
     else:
-        tfdata = _process_terraform_source(source, varfile, workspace, annotate, debug)
+        tfdata, primary_provider = _process_terraform_source(source, varfile, workspace, annotate, debug)
+    
     if "all_resource" in tfdata:
         _print_graph_debug(tfdata["graphdict"], "Terraform JSON graph dictionary")
-        tfdata = _enrich_graph_data(tfdata, debug, already_processed)
+        tfdata = _enrich_graph_data(tfdata, debug, already_processed, primary_provider)
         tfdata["graphdict"] = helpers.sort_graphdict(tfdata["graphdict"])
         _print_graph_debug(tfdata["graphdict"], "Enriched graphviz dictionary")
-    return tfdata
+    return tfdata, primary_provider
 
 
 def _check_dependencies() -> None:
@@ -258,7 +287,7 @@ def cli():
     help="Simplified high level services shown only",
 )
 @click.option("--annotate", default="", help="Path to custom annotations file (YAML)")
-@click.option("--avl_classes", hidden=True)
+# @click.option("--avl_classes", hidden=True) # Removed
 def draw(
     debug,
     source,
@@ -269,15 +298,15 @@ def draw(
     show,
     simplified,
     annotate,
-    avl_classes,
+    # avl_classes, # Removed
 ):
     """Draws Architecture Diagram"""
     if not debug:
         sys.excepthook = my_excepthook
     _show_banner()
     preflight_check()
-    tfdata = compile_tfdata(source, varfile, workspace, debug, annotate)
-    drawing.render_diagram(tfdata, show, simplified, outfile, format, source)
+    tfdata, provider_config = compile_tfdata(source, varfile, workspace, debug, annotate)
+    drawing.render_diagram(tfdata, show, simplified, outfile, format, source, provider_config)
 
 
 @cli.command()
@@ -309,7 +338,7 @@ def draw(
     help="Filename for output list (default architecture.json)",
 )
 @click.option("--annotate", default="", help="Path to custom annotations file (YAML)")
-@click.option("--avl_classes", hidden=True)
+# @click.option("--avl_classes", hidden=True) # Removed
 def graphdata(
     debug,
     source,
@@ -317,7 +346,7 @@ def graphdata(
     workspace,
     show_services,
     annotate,
-    avl_classes,
+    # avl_classes, # Removed
     outfile="graphdata.json",
 ):
     """List Cloud Resources and Relations as JSON"""
@@ -325,9 +354,9 @@ def graphdata(
         sys.excepthook = my_excepthook
     _show_banner()
     preflight_check()
-    tfdata = compile_tfdata(source, varfile, workspace, debug, annotate)
+    tfdata, provider_config = compile_tfdata(source, varfile, workspace, debug, annotate)
     click.echo(click.style("\nOutput JSON Dictionary :", fg="white", bold=True))
-    unique = helpers.unique_services(tfdata["graphdict"])
+    unique = helpers.unique_services(tfdata["graphdict"]) # Need to pass provider_config here if unique_services is provider-aware
     click.echo(
         json.dumps(
             tfdata["graphdict"] if not show_services else unique,
@@ -349,9 +378,4 @@ def graphdata(
 
 
 if __name__ == "__main__":
-    cli(
-        default_map={
-            "draw": {"avl_classes": dir()},
-            "graphlist": {"avl_classes": dir()},
-        }
-    )
+    cli()

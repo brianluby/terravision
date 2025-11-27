@@ -7,13 +7,14 @@ It processes annotation rules to add, remove, connect, and modify nodes in the g
 import sys
 from typing import Dict, List, Any
 import click
-import modules.cloud_config as cloud_config
+# import modules.cloud_config as cloud_config # Removed
 import modules.helpers as helpers
+from modules.provider_registry import ProviderConfig
 
-AUTO_ANNOTATIONS = cloud_config.AWS_AUTO_ANNOTATIONS
+# AUTO_ANNOTATIONS = cloud_config.AWS_AUTO_ANNOTATIONS # Removed
 
 
-def add_annotations(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def add_annotations(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Apply automatic and user-defined annotations to the Terraform graph.
 
     Processes both automatic cloud provider annotations and custom user annotations
@@ -24,11 +25,13 @@ def add_annotations(tfdata: Dict[str, Any]) -> Dict[str, Any]:
             - graphdict: Node connections dictionary
             - meta_data: Resource metadata dictionary
             - annotations: Optional user-defined annotations
+        provider_config: The primary provider configuration
 
     Returns:
         Modified tfdata dictionary with updated graphdict and meta_data
     """
     graphdict = tfdata["graphdict"]
+    AUTO_ANNOTATIONS = provider_config["config"]["AUTO_ANNOTATIONS"]
 
     # Apply automatic cloud provider annotations
     for node in list(graphdict):
@@ -87,9 +90,9 @@ def add_annotations(tfdata: Dict[str, Any]) -> Dict[str, Any]:
 
     # Apply user-defined annotations from YAML file if provided
     if tfdata.get("annotations"):
-        tfdata["graphdict"] = modify_nodes(tfdata["graphdict"], tfdata["annotations"])
+        tfdata["graphdict"] = modify_nodes(tfdata["graphdict"], tfdata["annotations"], provider_config)
         tfdata["meta_data"] = modify_metadata(
-            tfdata["annotations"], tfdata["graphdict"], tfdata["meta_data"]
+            tfdata["annotations"], tfdata["graphdict"], tfdata["meta_data"], provider_config
         )
 
     return tfdata
@@ -97,7 +100,7 @@ def add_annotations(tfdata: Dict[str, Any]) -> Dict[str, Any]:
 
 # TODO: Make this function DRY
 def modify_nodes(
-    graphdict: Dict[str, List[str]], annotate: Dict[str, Any]
+    graphdict: Dict[str, List[str]], annotate: Dict[str, Any], provider_config: ProviderConfig
 ) -> Dict[str, List[str]]:
     """Modify graph nodes based on user-defined annotations.
 
@@ -111,6 +114,7 @@ def modify_nodes(
             - connect: Connections to create
             - disconnect: Connections to remove
             - remove: Nodes to delete
+        provider_config: The primary provider configuration (unused but for consistent interface)
 
     Returns:
         Modified graphdict with user annotations applied
@@ -162,7 +166,7 @@ def modify_nodes(
                         ):
                             graphdict[node].remove(connection)
                 else:
-                    graphdict[startnode].delete(connection)
+                    graphdict[startnode].remove(connection) # Changed .delete to .remove
 
     # Delete nodes from the graph
     if annotate.get("remove"):
@@ -172,8 +176,10 @@ def modify_nodes(
                 prefix = node.split("*")[0]
                 # Handle wildcard deletion
                 if "*" in node and helpers.get_no_module_name(node).startswith(prefix):
-                    del graphdict[node]
-                else:
+                    for key in list(graphdict.keys()): # Iterate over a copy to avoid RuntimeError
+                        if helpers.get_no_module_name(key).startswith(prefix):
+                            del graphdict[key]
+                elif node in graphdict: # Check if node exists before deleting
                     del graphdict[node]
 
     return graphdict
@@ -184,6 +190,7 @@ def modify_metadata(
     annotations: Dict[str, Any],
     graphdict: Dict[str, List[str]],
     metadata: Dict[str, Dict[str, Any]],
+    provider_config: ProviderConfig
 ) -> Dict[str, Dict[str, Any]]:
     """Modify resource metadata based on user-defined annotations.
 
@@ -197,6 +204,7 @@ def modify_metadata(
             - update: Attribute updates for existing nodes
         graphdict: Dictionary mapping node names to connected nodes
         metadata: Dictionary mapping node names to their metadata attributes
+        provider_config: The primary provider configuration (unused but for consistent interface)
 
     Returns:
         Modified metadata dictionary with user annotations applied

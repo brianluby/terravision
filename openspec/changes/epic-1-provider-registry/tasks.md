@@ -1,0 +1,10 @@
+- [x] Create `modules/provider_registry.py` and define `ProviderConfig` (TypedDict) and `CloudConfig` classes.
+- [x] Implement `detect_providers(tfdata) -> List[ProviderConfig]` in `modules/provider_registry.py`.
+- [x] Implement `get_primary_provider(providers) -> ProviderConfig` in `modules/provider_registry.py`.
+- [x] Refactor `modules/cloud_config.py` to wrap AWS constants into an `AwsCloudConfig` instance.
+- [x] Stub empty `AZURE_CONFIG` and `GCP_CONFIG` in `modules/cloud_config.py`.
+- [x] Update `tfwrapper.tf_makegraph`, `graphmaker`, `resource_handlers`, and `drawing` signatures to accept a `provider_config`.
+- [x] Modify CLI (terravision.py) to detect provider and pass `provider_config` downstream.
+- [x] Add unit tests for `detect_providers` and `get_primary_provider`.
+- [x] Ensure all existing tests pass.
+- [x] Verify no direct `AWS_*` constant imports outside `cloud_config`.

@@ -10,6 +10,7 @@ import json
 import pytest
 from pathlib import Path
 from typing import List, Optional
+import shutil
 
 # Platform detection for cross-platform command execution
 WINDOWS = platform.system() == "Windows"
@@ -30,11 +31,18 @@ def run_terravision(
     Returns:
         CompletedProcess object with stdout, stderr, and returncode
     """
+    # Copy pyproject.toml and poetry.lock to the temporary directory for poetry to find
+    if cwd:
+        shutil.copy(PARENT_DIR / "pyproject.toml", cwd)
+        shutil.copy(PARENT_DIR / "poetry.lock", cwd)
+
     # Windows requires explicit Python invocation via Poetry and full path
     if WINDOWS:
         cmd = ["poetry", "run", "python", str(PARENT_DIR / "terravision.py")] + args
     else:
-        cmd = ["terravision"] + args
+        cmd = ["poetry", "run", "python", str(PARENT_DIR / "terravision.py")] + args
+        # cmd = ["terravision"] + args # Old command
+
 
     result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
     return result

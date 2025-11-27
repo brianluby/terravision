@@ -12,24 +12,25 @@ from modules.graphmaker import (
     dict_generator,
     cleanup_originals,
 )
+from modules.provider_registry import AWS_PROVIDER_CONFIG
 
 
 class TestReverseRelations(unittest.TestCase):
     def test_reverse_relations_basic(self):
         tfdata = {"graphdict": {"node1": ["node2"], "node2": []}}
-        result = reverse_relations(tfdata)
+        result = reverse_relations(tfdata, AWS_PROVIDER_CONFIG)
         self.assertIsInstance(result["graphdict"], dict)
 
 
 class TestCheckRelationship(unittest.TestCase):
     def test_check_relationship_no_match(self):
         tfdata = {"node_list": ["node1", "node2"], "graphdict": {"node1": [], "node2": []}, "hidden": []}
-        result = check_relationship("node1", ["value"], tfdata)
+        result = check_relationship("node1", ["value"], tfdata, AWS_PROVIDER_CONFIG)
         self.assertEqual(result, [])
 
     def test_check_relationship_with_match(self):
         tfdata = {"node_list": ["node1", "node2"], "graphdict": {"node1": [], "node2": []}, "hidden": []}
-        result = check_relationship("node1", ["node2"], tfdata)
+        result = check_relationship("node1", ["node2"], tfdata, AWS_PROVIDER_CONFIG)
         self.assertIsInstance(result, list)
 
 
@@ -43,7 +44,7 @@ class TestAddRelations(unittest.TestCase):
             "original_metadata": {"node1": {"param1": "value1"}, "node2": {"param2": "value2"}},
             "hidden": [],
         }
-        result = add_relations(tfdata)
+        result = add_relations(tfdata, AWS_PROVIDER_CONFIG)
         self.assertIn("graphdict", result)
         self.assertIn("original_graphdict_with_relations", result)
 
@@ -56,7 +57,7 @@ class TestAddRelations(unittest.TestCase):
             "original_metadata": {"node1": {"param1": "value1"}, "node2": {"param2": "value2"}},
             "hidden": [],
         }
-        result = add_relations(tfdata)
+        result = add_relations(tfdata, AWS_PROVIDER_CONFIG)
         self.assertEqual(len(result["graphdict"]["node1"]), 0)
 
     @patch("modules.graphmaker.click.echo")
@@ -68,7 +69,7 @@ class TestAddRelations(unittest.TestCase):
             "original_metadata": {"node1": {}, "node2": {}, "node3": {}},
             "hidden": ["node3"],
         }
-        result = add_relations(tfdata)
+        result = add_relations(tfdata, AWS_PROVIDER_CONFIG)
         self.assertNotIn("node3", result["graphdict"])
 
 
@@ -78,12 +79,12 @@ class TestConsolidateNodes(unittest.TestCase):
             "graphdict": {"null_resource.test": [], "node1": []},
             "meta_data": {"null_resource.test": {}, "node1": {}},
         }
-        result = consolidate_nodes(tfdata)
+        result = consolidate_nodes(tfdata, AWS_PROVIDER_CONFIG)
         self.assertNotIn("null_resource.test", result["graphdict"])
 
     def test_consolidate_nodes_basic(self):
         tfdata = {"graphdict": {"node1": []}, "meta_data": {"node1": {}}}
-        result = consolidate_nodes(tfdata)
+        result = consolidate_nodes(tfdata, AWS_PROVIDER_CONFIG)
         self.assertIn("node1", result["graphdict"])
 
 
@@ -115,12 +116,12 @@ class TestCleanupOriginals(unittest.TestCase):
             "graphdict": {"resource1": [], "resource2": []},
             "meta_data": {"resource1": {}, "resource2": {}},
         }
-        result = cleanup_originals(["resource1"], tfdata)
+        result = cleanup_originals(["resource1"], tfdata, AWS_PROVIDER_CONFIG)
         self.assertNotIn("resource1", result["graphdict"])
 
     def test_cleanup_originals_empty_list(self):
         tfdata = {"graphdict": {"resource1": []}, "meta_data": {"resource1": {}}}
-        result = cleanup_originals([], tfdata)
+        result = cleanup_originals([], tfdata, AWS_PROVIDER_CONFIG)
         self.assertIn("resource1", result["graphdict"])
 
 

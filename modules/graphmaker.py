@@ -11,24 +11,13 @@ from typing import Dict, List, Any, Tuple, Generator, Optional
 
 import click
 
-import modules.cloud_config as cloud_config
 import modules.helpers as helpers
 import modules.resource_handlers as resource_handlers
-
-REVERSE_ARROW_LIST = cloud_config.AWS_REVERSE_ARROW_LIST
-IMPLIED_CONNECTIONS = cloud_config.AWS_IMPLIED_CONNECTIONS
-GROUP_NODES = cloud_config.AWS_GROUP_NODES
-CONSOLIDATED_NODES = cloud_config.AWS_CONSOLIDATED_NODES
-NODE_VARIANTS = cloud_config.AWS_NODE_VARIANTS
-SPECIAL_RESOURCES = cloud_config.AWS_SPECIAL_RESOURCES
-SHARED_SERVICES = cloud_config.AWS_SHARED_SERVICES
-AUTO_ANNOTATIONS = cloud_config.AWS_AUTO_ANNOTATIONS
-EDGE_NODES = cloud_config.AWS_EDGE_NODES
-FORCED_DEST = cloud_config.AWS_FORCED_DEST
-FORCED_ORIGIN = cloud_config.AWS_FORCED_ORIGIN
+from modules.provider_registry import ProviderConfig
 
 
-def reverse_relations(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+
+def reverse_relations(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Reverse connection directions for specific resource types.
 
     Adjusts arrow directions in the graph based on FORCED_DEST and FORCED_ORIGIN
@@ -36,10 +25,13 @@ def reverse_relations(tfdata: Dict[str, Any]) -> Dict[str, Any]:
 
     Args:
         tfdata: Terraform data dictionary with graphdict
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with reversed connections
     """
+    FORCED_DEST = provider_config["config"]["FORCED_DEST"]
+    FORCED_ORIGIN = provider_config["config"]["FORCED_ORIGIN"]
     for n, connections in dict(tfdata["graphdict"]).items():
         node = helpers.get_no_module_name(n)
         reverse_dest = len([s for s in FORCED_DEST if node.startswith(s)]) > 0
@@ -59,7 +51,7 @@ def reverse_relations(tfdata: Dict[str, Any]) -> Dict[str, Any]:
                         s
                         for s in FORCED_ORIGIN
                         if helpers.get_no_module_name(c).startswith(s)
-                        and node.split(".")[0] not in str(AUTO_ANNOTATIONS)
+                        and node.split(".")[0] not in str(provider_config["config"]["AUTO_ANNOTATIONS"])
                     ]
                 )
                 > 0
@@ -72,7 +64,7 @@ def reverse_relations(tfdata: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def check_relationship(
-    resource_associated_with: str, plist: List[Any], tfdata: Dict[str, Any]
+    resource_associated_with: str, plist: List[Any], tfdata: Dict[str, Any], provider_config: ProviderConfig
 ) -> List[str]:
     """Check if a resource references other known resources.
 
@@ -83,6 +75,7 @@ def check_relationship(
         resource_associated_with: Resource name being checked
         plist: List of parameter values from the resource
         tfdata: Terraform data dictionary with node_list and hidden nodes
+        provider_config: The primary provider configuration
 
     Returns:
         List of connection pairs [origin, dest, origin, dest, ...]
@@ -91,6 +84,8 @@ def check_relationship(
     hidden = tfdata["hidden"]
     connection_pairs: List[str] = list()
     matching: List[str] = list()
+    IMPLIED_CONNECTIONS = provider_config["config"]["IMPLIED_CONNECTIONS"]
+    REVERSE_ARROW_LIST = provider_config["config"]["REVERSE_ARROW_LIST"]
 
     # Scan each parameter for resource references
     for p in plist:
@@ -196,7 +191,7 @@ def check_relationship(
     return connection_pairs
 
 
-def add_relations(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def add_relations(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Build final graph structure by detecting resource relationships.
 
     Scans resource metadata to find references between resources and adds
@@ -204,6 +199,7 @@ def add_relations(tfdata: Dict[str, Any]) -> Dict[str, Any]:
 
     Args:
         tfdata: Terraform data dictionary with node_list and meta_data
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with complete graphdict including all relationships
@@ -232,17 +228,17 @@ def add_relations(tfdata: Dict[str, Any]) -> Dict[str, Any]:
         # Skip certain resource types
         if (
             helpers.get_no_module_name(nodename).startswith("random")
-            or helpers.get_no_module_name(node).startswith("aws_security_group")
+            or helpers.get_no_module_name(node).startswith(f"{provider_config['name']}_security_group")
             or helpers.get_no_module_name(node).startswith("null")
         ):
             continue
 
         # Get metadata generator for parameter scanning
         if nodename not in tfdata["meta_data"].keys():
-            dg = dict_generator(tfdata["original_metadata"][node])
-            tfdata["meta_data"][node] = copy.deepcopy(tfdata["original_metadata"][node])
+            dg = dict_generator(tfdata["original_metadata"].get(node, {}))
+            tfdata["meta_data"][node] = copy.deepcopy(tfdata["original_metadata"].get(node, {}))
         else:
-            dg = dict_generator(tfdata["meta_data"][nodename])
+            dg = dict_generator(tfdata["meta_data"].get(nodename, {}))
 
         # Check each parameter for relationships
         for param_item_list in dg:
@@ -250,6 +246,7 @@ def add_relations(tfdata: Dict[str, Any]) -> Dict[str, Any]:
                 node,
                 param_item_list,
                 tfdata,
+                provider_config,
             )
             # Process connection pairs
             if matching_result and len(matching_result) >= 2:
@@ -260,7 +257,7 @@ def add_relations(tfdata: Dict[str, Any]) -> Dict[str, Any]:
                     # Add connection if not exists and not security group
                     if dest not in c_list and not helpers.get_no_module_name(
                         origin
-                    ).startswith("aws_security_group"):
+                    ).startswith(f"{provider_config['name']}_security_group"):
                         click.echo(f"   {origin} --> {dest}")
                         c_list.append(dest)
                         # Replace unnumbered with numbered version
@@ -287,7 +284,7 @@ def add_relations(tfdata: Dict[str, Any]) -> Dict[str, Any]:
     return tfdata
 
 
-def consolidate_nodes(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def consolidate_nodes(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Consolidate similar resources into single nodes.
 
     Merges resources that should be represented as a single node in the diagram
@@ -295,6 +292,7 @@ def consolidate_nodes(tfdata: Dict[str, Any]) -> Dict[str, Any]:
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with consolidated nodes
@@ -315,7 +313,7 @@ def consolidate_nodes(tfdata: Dict[str, Any]) -> Dict[str, Any]:
             resdata = copy.deepcopy(tfdata["meta_data"][resource])
         else:
             continue
-        consolidated_name = helpers.consolidated_node_check(resource)
+        consolidated_name = helpers.consolidated_node_check(resource, provider_config)
         if consolidated_name:
             if not tfdata["meta_data"].get(consolidated_name):
                 tfdata["graphdict"][consolidated_name] = list()
@@ -337,8 +335,8 @@ def consolidate_nodes(tfdata: Dict[str, Any]) -> Dict[str, Any]:
         else:
             connected_resource = resource
         for index, connection in enumerate(tfdata["graphdict"][connected_resource]):
-            if helpers.consolidated_node_check(connection):
-                consolidated_connection = helpers.consolidated_node_check(connection)
+            if helpers.consolidated_node_check(connection, provider_config):
+                consolidated_connection = helpers.consolidated_node_check(connection, provider_config)
                 if consolidated_connection and consolidated_connection != connection:
                     if (
                         not consolidated_connection
@@ -364,7 +362,7 @@ def consolidate_nodes(tfdata: Dict[str, Any]) -> Dict[str, Any]:
     return tfdata
 
 
-def handle_variants(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def handle_variants(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Rename nodes based on resource variants.
 
     Applies variant suffixes to node names based on resource attributes
@@ -372,10 +370,12 @@ def handle_variants(tfdata: Dict[str, Any]) -> Dict[str, Any]:
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with variant node names
     """
+    SPECIAL_RESOURCES = provider_config["config"]["SPECIAL_RESOURCES"]
     # Loop through all top level nodes and rename if variants exist
     for node in dict(tfdata["graphdict"]):
         node_title = helpers.get_no_module_name(node).split(".")[1]
@@ -383,9 +383,9 @@ def handle_variants(tfdata: Dict[str, Any]) -> Dict[str, Any]:
             node_name = node.split("~")[0]
         else:
             node_name = node
-        if helpers.get_no_module_name(node_name).startswith("aws"):
+        if helpers.get_no_module_name(node_name).startswith(provider_config['name']):
             renamed_node = helpers.check_variant(
-                node, tfdata["meta_data"].get(node_name)
+                node, tfdata["meta_data"].get(node_name), provider_config
             )
         else:
             renamed_node = False
@@ -407,18 +407,18 @@ def handle_variants(tfdata: Dict[str, Any]) -> Dict[str, Any]:
                     resource_name = resource.split("~")[0]
             else:
                 resource_name = resource
-            if helpers.get_no_module_name(resource_name).startswith("aws"):
+            if helpers.get_no_module_name(resource_name).startswith(provider_config['name']):
                 variant_suffix = helpers.check_variant(
-                    resource, tfdata["meta_data"].get(resource_name)
+                    resource, tfdata["meta_data"].get(resource_name), provider_config
                 )
                 variant_label = resource.split(".")[1]
             if (
                 variant_suffix
                 and helpers.get_no_module_name(resource).split(".")[0]
                 not in SPECIAL_RESOURCES.keys()
-                and not renamed_node.startswith("aws_group.shared")
+                and not renamed_node.startswith(f"{provider_config['name']}_group.shared")
                 and (
-                    resource not in tfdata["graphdict"]["aws_group.shared_services"]
+                    resource not in tfdata["graphdict"].get(f"{provider_config['name']}_group.shared_services", [])
                     or "~" in node
                 )
                 and resource.split(".")[0] != node.split(".")[0]
@@ -435,7 +435,7 @@ def handle_variants(tfdata: Dict[str, Any]) -> Dict[str, Any]:
     return tfdata
 
 
-def needs_multiple(resource: str, parent: str, tfdata: Dict[str, Any]) -> bool:
+def needs_multiple(resource: str, parent: str, tfdata: Dict[str, Any], provider_config: ProviderConfig) -> bool:
     """Determine if resource needs multiple numbered instances.
 
     Checks if a resource should be duplicated with numbered suffixes based
@@ -445,13 +445,18 @@ def needs_multiple(resource: str, parent: str, tfdata: Dict[str, Any]) -> bool:
         resource: Resource name to check
         parent: Parent resource name
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         True if resource needs multiple instances
     """
+    GROUP_NODES = provider_config["config"]["GROUP_NODES"]
+    SPECIAL_RESOURCES = provider_config["config"]["SPECIAL_RESOURCES"]
+    SHARED_SERVICES = provider_config["config"]["SHARED_SERVICES"]
+    
     target_resource = (
-        helpers.consolidated_node_check(resource)
-        if helpers.consolidated_node_check(resource)
+        helpers.consolidated_node_check(resource, provider_config)
+        if helpers.consolidated_node_check(resource, provider_config)
         and tfdata["meta_data"].get(resource)
         else resource
     )
@@ -467,15 +472,15 @@ def needs_multiple(resource: str, parent: str, tfdata: Dict[str, Any]) -> bool:
         or resource.split(".")[0] in GROUP_NODES
     )
     not_shared_service = resource.split(".")[0] not in SHARED_SERVICES
-    if helpers.get_no_module_name(resource).split(".")[0] == "aws_security_group":
+    if helpers.get_no_module_name(resource).split(".")[0] == f"{provider_config['name']}_security_group":
         security_group_with_count = (
-            tfdata["original_metadata"][parent].get("count")
-            and int(tfdata["original_metadata"][parent].get("count")) > 1
+            tfdata["original_metadata"].get(parent, {}).get("count")
+            and int(tfdata["original_metadata"].get(parent, {}).get("count")) > 1
         )
     else:
         security_group_with_count = False
-    has_variant = helpers.check_variant(resource, tfdata["meta_data"][resource])
-    not_unique_resource = "aws_route_table." not in resource
+    has_variant = helpers.check_variant(resource, tfdata["meta_data"].get(resource, {}), provider_config)
+    not_unique_resource = f"{provider_config['name']}_route_table." not in resource
     if (
         (
             (target_is_group and target_has_count)
@@ -546,8 +551,9 @@ def needs_multiple(resource: str, parent: str, tfdata: Dict[str, Any]) -> bool:
 
 
 def add_multiples_to_parents(
-    i: int, resource: str, multi_resources: list, tfdata: dict
+    i: int, resource: str, multi_resources: list, tfdata: dict, provider_config: ProviderConfig
 ):
+    SHARED_SERVICES = provider_config["config"]["SHARED_SERVICES"]
     parents_list = helpers.list_of_parents(tfdata["graphdict"], resource)
     # Add numbered name to all original parents which may have been missed due to no count property
     for parent in parents_list:
@@ -566,21 +572,21 @@ def add_multiples_to_parents(
             if (
                 parent.split("~")[0] in tfdata["meta_data"].keys()
                 and (tfdata["meta_data"][parent.split("~")[0]].get("count"))
-                and not parent.startswith("aws_group.shared")
+                and not parent.startswith(f"{provider_config['name']}_group.shared")
                 and not suffixed_name in tfdata["graphdict"][parent]
                 and not ("cluster" in suffixed_name and "cluster" in parent)
-                and "aws_route_table." not in resource
+                and f"{provider_config['name']}_route_table." not in resource
             ):
                 # Handle special case for security groups where if any parent has count>1, then create a numbered sg
                 if (
                     helpers.any_parent_has_count(tfdata, resource)
                     and helpers.get_no_module_name(parent).split(".")[0]
-                    == "aws_security_group"
+                    == f"{provider_config['name']}_security_group"
                     and "~" not in parent
                 ) or (
                     helpers.any_parent_has_count(tfdata, resource)
                     and helpers.get_no_module_name(parent).split(".")[0]
-                    == "aws_security_group"
+                    == f"{provider_config['name']}_security_group"
                     and "~" in parent
                     and helpers.check_list_for_dash(tfdata["graphdict"][parent])
                 ):
@@ -622,7 +628,7 @@ def add_multiples_to_parents(
 
 
 def cleanup_originals(
-    multi_resources: List[str], tfdata: Dict[str, Any]
+    multi_resources: List[str], tfdata: Dict[str, Any], provider_config: ProviderConfig
 ) -> Dict[str, Any]:
     """Remove original resource names after creating numbered instances.
 
@@ -632,30 +638,32 @@ def cleanup_originals(
     Args:
         multi_resources: List of resources with multiple instances
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with original names removed
     """
+    SHARED_SERVICES = provider_config["config"]["SHARED_SERVICES"]
     # Now remove the original resource names
     for resource in multi_resources:
         if (
             helpers.list_of_dictkeys_containing(tfdata["graphdict"], resource)
-            and not resource.split(".")[0] in SHARED_SERVICES
+            and resource.split(".")[0] not in SHARED_SERVICES
         ):
             del tfdata["graphdict"][resource]
         parents_list = helpers.list_of_parents(tfdata["graphdict"], resource)
         for parent in parents_list:
             if (
                 resource in tfdata["graphdict"][parent]
-                and not parent.startswith("aws_group.shared")
-                and not "~" in parent
+                and not parent.startswith(f"{provider_config['name']}_group.shared")
+                and "~" not in parent
             ):
                 tfdata["graphdict"][parent].remove(resource)
     # Delete any original security group nodes that have been replaced with numbered suffixes
     security_group_list = [
         k
         for k in tfdata["graphdict"]
-        if helpers.get_no_module_name(k).startswith("aws_security_group") and "~" in k
+        if helpers.get_no_module_name(k).startswith(f"{provider_config['name']}_security_group") and "~" in k
     ]
     for security_group in security_group_list:
         check_original = security_group.split("~")[0]
@@ -665,7 +673,7 @@ def cleanup_originals(
 
 
 # Handle resources which require pre/post-processing before/after being added to graphdict
-def handle_special_resources(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def handle_special_resources(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Apply special processing for specific resource types.
 
     Delegates to resource-specific handlers for resources that need
@@ -673,17 +681,20 @@ def handle_special_resources(tfdata: Dict[str, Any]) -> Dict[str, Any]:
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata after special processing
     """
+    SPECIAL_RESOURCES = provider_config["config"]["SPECIAL_RESOURCES"]
     resource_types = list(
         {helpers.get_no_module_name(k).split(".")[0] for k in tfdata["node_list"]}
     )
     for resource_prefix, handler in SPECIAL_RESOURCES.items():
         matching_substring = [s for s in resource_types if resource_prefix in s]
         if resource_prefix in resource_types or matching_substring:
-            tfdata = getattr(resource_handlers, handler)(tfdata)
+            # Pass provider_config to the handler function
+            tfdata = getattr(resource_handlers, handler)(tfdata, provider_config)
     return tfdata
 
 
@@ -720,7 +731,7 @@ def dict_generator(
 
 # Loop through every connected node that has a count >0 and add suffix ~i where i is the source node suffix
 def add_number_suffix(
-    i: int, check_multiple_resource: str, tfdata: Dict[str, Any]
+    i: int, check_multiple_resource: str, tfdata: Dict[str, Any], provider_config: ProviderConfig
 ) -> List[str]:
     """Add numbered suffix to resource connections.
 
@@ -731,6 +742,7 @@ def add_number_suffix(
         i: Suffix number to add
         check_multiple_resource: Resource name to process
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         List of connections with appropriate numbered suffixes
@@ -756,6 +768,7 @@ def add_number_suffix(
                         helpers.get_no_module_name(res),
                         check_multiple_resource,
                         tfdata,
+                        provider_config,
                     )
                     or res in tfdata["graphdict"].keys()
                 )
@@ -767,7 +780,7 @@ def add_number_suffix(
     return new_list
 
 
-def extend_sg_groups(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def extend_sg_groups(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Extend security groups to match numbered resource instances.
 
     Creates numbered security group instances to match numbered resources
@@ -775,6 +788,7 @@ def extend_sg_groups(tfdata: Dict[str, Any]) -> Dict[str, Any]:
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with extended security groups
@@ -782,9 +796,9 @@ def extend_sg_groups(tfdata: Dict[str, Any]) -> Dict[str, Any]:
     list_of_sgs = [
         s
         for s in tfdata["graphdict"]
-        if helpers.get_no_module_name(s).startswith("aws_security_group")
+        if helpers.get_no_module_name(s).startswith(f"{provider_config['name']}_security_group")
     ]
-    for sg in list_of_sgs:
+    for sg in list(list_of_sgs):
         expanded = False
         for connection in list(tfdata["graphdict"][sg]):
             if "~" in connection and "~" not in sg:
@@ -819,41 +833,8 @@ def extend_sg_groups(tfdata: Dict[str, Any]) -> Dict[str, Any]:
     return tfdata
 
 
-def add_multiples_to_parents(
-    i: int, resource: str, multi_resources: list, tfdata: dict
-):
-    parents_list = helpers.list_of_parents(tfdata["graphdict"], resource)
-    # Add numbered name to all original parents which may have been missed due to no count property
-    for parent in parents_list:
-        if parent not in multi_resources:
-            if "~" in parent:
-                # We have a suffix so check it matches the i count
-                existing_suffix = parent.split("~")[1]
-                if existing_suffix == str(i + 1):
-                    suffixed_name = resource + "~" + str(i + 1)
-                else:
-                    suffixed_name = resource + "~" + existing_suffix
-            else:
-                suffixed_name = resource + "~" + str(i + 1)
-            if (
-                parent.split("~")[0] in tfdata["meta_data"].keys()
-                and (
-                    not tfdata["meta_data"][parent.split("~")[0]].get("count")
-                    or tfdata["meta_data"][parent.split("~")[0]].get("count") == 1
-                )
-                and not parent.startswith("aws_group.shared")
-                and not suffixed_name in tfdata["graphdict"][parent]
-                and not ("cluster" in suffixed_name and "cluster" in parent)
-                and "aws_route_table." not in resource
-            ):
-                tfdata["graphdict"][parent].append(suffixed_name)
-                if resource in tfdata["graphdict"][parent]:
-                    tfdata["graphdict"][parent].remove(resource)
-    return tfdata
-
-
 def handle_count_resources(
-    multi_resources: List[str], tfdata: Dict[str, Any]
+    multi_resources: List[str], tfdata: Dict[str, Any], provider_config: ProviderConfig
 ) -> Dict[str, Any]:
     """Create multiple node instances for resources with count > 1.
 
@@ -863,20 +844,22 @@ def handle_count_resources(
     Args:
         multi_resources: List of resources that need multiple instances
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with numbered resource instances
     """
+    SHARED_SERVICES = provider_config["config"]["SHARED_SERVICES"]
     # Process each resource with count attribute
     for resource in multi_resources:
         # Determine number of instances to create
-        if tfdata["meta_data"][resource].get("count"):
+        if tfdata["meta_data"].get(resource) and tfdata["meta_data"][resource].get("count"):
             max_i = int(tfdata["meta_data"][resource].get("count"))
-        elif tfdata["meta_data"][resource].get("max_capacity"):
+        elif tfdata["meta_data"].get(resource) and tfdata["meta_data"][resource].get("max_capacity"):
             max_i = int(
                 tfdata["meta_data"][resource].get("max_capacity").replace('"', "")
             )
-        elif tfdata["meta_data"][resource].get("desired_count"):
+        elif tfdata["meta_data"].get(resource) and tfdata["meta_data"][resource].get("desired_count"):
             max_i = int(
                 tfdata["meta_data"][resource].get("desired_count").replace('"', "")
             )
@@ -886,7 +869,7 @@ def handle_count_resources(
         # Create numbered instances
         for i in range(max_i):
             # Get connections with numbered suffixes
-            resource_i = add_number_suffix(i + 1, resource, tfdata)
+            resource_i = add_number_suffix(i + 1, resource, tfdata, provider_config)
             not_shared_service = resource.split(".")[0] not in SHARED_SERVICES
 
             if not_shared_service:
@@ -895,7 +878,7 @@ def handle_count_resources(
                 tfdata["meta_data"][resource + "~" + str(i + 1)] = copy.deepcopy(
                     tfdata["meta_data"][resource]
                 )
-                tfdata = add_multiples_to_parents(i, resource, multi_resources, tfdata)
+                tfdata = add_multiples_to_parents(i, resource, multi_resources, tfdata, provider_config)
 
                 # Create numbered instances for connections if needed
                 for numbered_node in resource_i:
@@ -906,7 +889,7 @@ def handle_count_resources(
                             tfdata["graphdict"], original_name
                         )
                         and original_name not in multi_resources
-                        and not helpers.consolidated_node_check(original_name)
+                        and not helpers.consolidated_node_check(original_name, provider_config)
                     ):
                         # Handle first instance
                         if i == 0:
@@ -919,7 +902,7 @@ def handle_count_resources(
                                     tfdata["graphdict"][original_name]
                                 )
                                 tfdata = add_multiples_to_parents(
-                                    i, original_name, multi_resources, tfdata
+                                    i, original_name, multi_resources, tfdata, provider_config
                                 )
                                 del tfdata["graphdict"][original_name]
                         else:
@@ -938,12 +921,12 @@ def handle_count_resources(
                                     ]
                                 )
                             tfdata = add_multiples_to_parents(
-                                i, original_name, multi_resources, tfdata
+                                i, original_name, multi_resources, tfdata, provider_config
                             )
     return tfdata
 
 
-def handle_singular_references(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def handle_singular_references(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Handle connections to single instances of numbered resources.
 
     Ensures numbered nodes connect to appropriately numbered instances
@@ -951,6 +934,7 @@ def handle_singular_references(tfdata: Dict[str, Any]) -> Dict[str, Any]:
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with corrected singular references
@@ -964,7 +948,7 @@ def handle_singular_references(tfdata: Dict[str, Any]) -> Dict[str, Any]:
                     tfdata["graphdict"][node].append(suffixed_node)
                     tfdata["graphdict"][node].remove(c)
             # If cosolidated node, add all connections to node
-            if "~" in c and (helpers.consolidated_node_check(node) or "~" not in node):
+            if "~" in c and (helpers.consolidated_node_check(node, provider_config) or "~" not in node):
                 for i in range(1, int(c.split("~")[1]) + 4):
                     suffixed_node = f"{c.split('~')[0]}~{i}"
                     if (
@@ -975,7 +959,7 @@ def handle_singular_references(tfdata: Dict[str, Any]) -> Dict[str, Any]:
     return tfdata
 
 
-def create_multiple_resources(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def create_multiple_resources(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Main function to create multiple resource instances.
 
     Orchestrates the creation of numbered resource instances for all
@@ -983,10 +967,12 @@ def create_multiple_resources(tfdata: Dict[str, Any]) -> Dict[str, Any]:
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with all multiple resource instances created
     """
+    SHARED_SERVICES = provider_config["config"]["SHARED_SERVICES"]
     # Identify resources with count/for_each attributes
     multi_resources = [
         n
@@ -1000,15 +986,15 @@ def create_multiple_resources(tfdata: Dict[str, Any]) -> Dict[str, Any]:
                 or tfdata["meta_data"][n].get("max_capacity")
                 or tfdata["meta_data"][n].get("for_each")
             )
-            and not helpers.consolidated_node_check(n)
+            and not helpers.consolidated_node_check(n, provider_config)
         )
     ]
 
     # Create numbered instances
-    tfdata = handle_count_resources(multi_resources, tfdata)
+    tfdata = handle_count_resources(multi_resources, tfdata, provider_config)
 
     # Fix singular references to numbered nodes
-    tfdata = handle_singular_references(tfdata)
+    tfdata = handle_singular_references(tfdata, provider_config)
 
     # Clean up original resource names
     for resource in multi_resources:
@@ -1024,9 +1010,9 @@ def create_multiple_resources(tfdata: Dict[str, Any]) -> Dict[str, Any]:
         for parent in parents_list:
             if (
                 resource in tfdata["graphdict"][parent]
-                and not parent.startswith("aws_group.shared")
+                and not parent.startswith(f"{provider_config['name']}_group.shared")
                 and "~" not in parent
-                and not tfdata["meta_data"][resource].get("count")
+                and not tfdata["meta_data"].get(resource, {}).get("count")
             ):
                 tfdata["graphdict"][parent].remove(resource)
 
@@ -1034,7 +1020,7 @@ def create_multiple_resources(tfdata: Dict[str, Any]) -> Dict[str, Any]:
     security_group_list = [
         k
         for k in tfdata["graphdict"]
-        if helpers.get_no_module_name(k).startswith("aws_security_group") and "~" in k
+        if helpers.get_no_module_name(k).startswith(f"{provider_config['name']}_security_group") and "~" in k
     ]
     for security_group in security_group_list:
         check_original = security_group.split("~")[0]
@@ -1042,6 +1028,6 @@ def create_multiple_resources(tfdata: Dict[str, Any]) -> Dict[str, Any]:
             del tfdata["graphdict"][check_original]
 
     # Extend security groups for numbered instances
-    tfdata = extend_sg_groups(tfdata)
+    tfdata = extend_sg_groups(tfdata, provider_config)
 
     return tfdata

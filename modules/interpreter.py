@@ -10,6 +10,7 @@ import hcl2
 import click
 import re
 from pathlib import Path
+from modules.provider_registry import ProviderConfig
 
 # "data.aws_availability_zones": ["AZ1", "AZ2", "AZ3"],
 DATA_REPLACEMENTS = {
@@ -21,7 +22,7 @@ DATA_REPLACEMENTS = {
 
 
 def resolve_all_variables(
-    tfdata: Dict[str, Any], debug: bool, already_processed: bool
+    tfdata: Dict[str, Any], debug: bool, already_processed: bool, provider_config: ProviderConfig
 ) -> Dict[str, Any]:
     """Resolve all Terraform variables, locals, and module outputs.
 
@@ -29,6 +30,7 @@ def resolve_all_variables(
         tfdata: Terraform data dictionary containing resources and variables
         debug: Enable debug output and logging
         already_processed: Skip variable file processing if already done
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with all variables resolved
@@ -38,7 +40,7 @@ def resolve_all_variables(
     # Create view of locals by module
     tfdata = extract_locals(tfdata)
     # Create metadata view from nested TF file resource attributes
-    tfdata = merge_metadata(tfdata)
+    tfdata = merge_metadata(tfdata, provider_config)
     # Replace metadata (resource attributes) variables and locals with actual values
     tfdata = handle_metadata_vars(tfdata)
     # Inject parent module variables that are referenced downstream in sub modules
@@ -582,6 +584,7 @@ def handle_implied_resources(
     resource_name: str,
     tfdata: Dict[str, Any],
     meta_data: Dict[str, Any],
+    provider_config: ProviderConfig,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Add implied resources based on resource attributes.
 
@@ -591,17 +594,18 @@ def handle_implied_resources(
         resource_name: Name of resource
         tfdata: Terraform data dictionary
         meta_data: Resource metadata dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Tuple of updated meta_data and tfdata
     """
     # Check if Cloudwatch is present in policies and create node for Cloudwatch service if found
-    if resource_type == "aws_iam_policy":
+    if resource_type == f"{provider_config['name']}_iam_policy":
         if "logs:" in item[resource_type][resource_name]["policy"][0]:
-            if not "aws_cloudwatch_log_group.logs" in tfdata["node_list"]:
-                tfdata["node_list"].append("aws_cloudwatch_log_group.logs")
-                tfdata["graphdict"]["aws_cloudwatch_log_group.logs"] = []
-            meta_data["aws_cloudwatch_log_group.logs"] = item[resource_type][
+            if not f"{provider_config['name']}_cloudwatch_log_group.logs" in tfdata["node_list"]:
+                tfdata["node_list"].append(f"{provider_config['name']}_cloudwatch_log_group.logs")
+                tfdata["graphdict"][f"{provider_config['name']}_cloudwatch_log_group.logs"] = []
+            meta_data[f"{provider_config['name']}_cloudwatch_log_group.logs"] = item[resource_type][
                 resource_name
             ]
     return meta_data, tfdata
@@ -670,11 +674,12 @@ def find_resource_in_all_resource(
     return None, None
 
 
-def merge_metadata(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def merge_metadata(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Extract resource attributes from Terraform source and plan data and merge to create metadata.
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with meta_data keys populated
@@ -698,7 +703,7 @@ def merge_metadata(tfdata: Dict[str, Any]) -> Dict[str, Any]:
         )
         if item:
             meta_data, tfdata = handle_implied_resources(
-                item, resource_type, actual_key, tfdata, meta_data
+                item, resource_type, actual_key, tfdata, meta_data, provider_config
             )
             omd = dict(tfdata["original_metadata"][resource_node])
             md = item[resource_type][actual_key]

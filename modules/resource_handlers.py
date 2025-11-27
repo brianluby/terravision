@@ -5,33 +5,31 @@ EFS, CloudFront, autoscaling, subnets, and other AWS-specific relationships.
 """
 
 from typing import Dict, List, Any
-import modules.cloud_config as cloud_config
+# import modules.cloud_config as cloud_config # Removed
 import modules.helpers as helpers
 from ast import literal_eval
 import re
 import copy
 
-REVERSE_ARROW_LIST = cloud_config.AWS_REVERSE_ARROW_LIST
-IMPLIED_CONNECTIONS = cloud_config.AWS_IMPLIED_CONNECTIONS
-GROUP_NODES = cloud_config.AWS_GROUP_NODES
-CONSOLIDATED_NODES = cloud_config.AWS_CONSOLIDATED_NODES
-NODE_VARIANTS = cloud_config.AWS_NODE_VARIANTS
-SPECIAL_RESOURCES = cloud_config.AWS_SPECIAL_RESOURCES
-SHARED_SERVICES = cloud_config.AWS_SHARED_SERVICES
-DISCONNECT_SERVICES = cloud_config.AWS_DISCONNECT_LIST
+from modules.provider_registry import ProviderConfig
+
+# Removed direct imports and reassignments of AWS_* constants.
+# These will be accessed via the passed provider_config.
 
 
-def handle_special_cases(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def handle_special_cases(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Handle special resource cases and disconnections.
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with special cases handled
     """
+    DISCONNECT_SERVICES = provider_config["config"]["DISCONNECT_LIST"]
     # Handle cases where resources have transitive link via sqs policy
-    tfdata["graphdict"] = link_sqs_queue_policy(tfdata["graphdict"])
+    tfdata["graphdict"] = link_sqs_queue_policy(tfdata["graphdict"], provider_config)
     # Remove connections to services specified in disconnect services
     for r in sorted(tfdata["graphdict"].keys()):
         for d in DISCONNECT_SERVICES:
@@ -40,11 +38,12 @@ def handle_special_cases(tfdata: Dict[str, Any]) -> Dict[str, Any]:
     return tfdata
 
 
-def aws_handle_autoscaling(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def aws_handle_autoscaling(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Handle AWS autoscaling group relationships and counts.
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with autoscaling relationships configured
@@ -54,13 +53,13 @@ def aws_handle_autoscaling(tfdata: Dict[str, Any]) -> Dict[str, Any]:
         scaler_links = next(
             v
             for k, v in tfdata["graphdict"].items()
-            if "aws_appautoscaling_target" in k
+            if f"{provider_config['name']}_appautoscaling_target" in k
         )
         # Get all autoscaling resources
         asg_resources = [
             r
             for r in tfdata["graphdict"]
-            if helpers.get_no_module_name(r).startswith("aws_appautoscaling_target")
+            if helpers.get_no_module_name(r).startswith(f"{provider_config['name']}_appautoscaling_target")
         ]
         # Process each autoscaling group
         for asg in asg_resources:
@@ -70,7 +69,7 @@ def aws_handle_autoscaling(tfdata: Dict[str, Any]) -> Dict[str, Any]:
                 possible_subnets = [
                     k
                     for k in tfdata["graphdict"]
-                    if helpers.get_no_module_name(k).startswith("aws_subnet")
+                    if helpers.get_no_module_name(k).startswith(f"{provider_config['name']}_subnet")
                 ]
                 # Check if service is in subnet (part of ASG)
                 for sub in possible_subnets:
@@ -90,7 +89,7 @@ def aws_handle_autoscaling(tfdata: Dict[str, Any]) -> Dict[str, Any]:
                             if isinstance(count_value, (int, str))
                             else count_value
                         )
-    except:
+    except StopIteration: # Catch error if scaler_links is not found
         pass
     # Replace subnet references to ASG targets with ASG itself
     for asg in asg_resources:
@@ -102,7 +101,7 @@ def aws_handle_autoscaling(tfdata: Dict[str, Any]) -> Dict[str, Any]:
             subnets_to_change = [
                 k
                 for k in asg_target_parents
-                if helpers.get_no_module_name(k).startswith("aws_subnet")
+                if helpers.get_no_module_name(k).startswith(f"{provider_config['name']}_subnet")
             ]
             # Update subnet connections
             for subnet in subnets_to_change:
@@ -113,7 +112,7 @@ def aws_handle_autoscaling(tfdata: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def handle_cloudfront_domains(
-    origin_string: str, domain: str, mdata: Dict[str, Any]
+    origin_string: str, domain: str, mdata: Dict[str, Any], provider_config: ProviderConfig
 ) -> str:
     """Link CloudFront to resources by matching domain names.
 
@@ -121,6 +120,7 @@ def handle_cloudfront_domains(
         origin_string: Original origin configuration string
         domain: Domain name to search for
         mdata: Resource metadata dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated origin string with resource references
@@ -131,29 +131,31 @@ def handle_cloudfront_domains(
             # Check if domain is referenced in non-CloudFront/Route53 resources
             if (
                 domain in str(v)
-                and not domain.startswith("aws_")
-                and not helpers.get_no_module_name(key).startswith("aws_cloudfront")
-                and not helpers.get_no_module_name(key).startswith("aws_route53")
+                and not domain.startswith(f"{provider_config['name']}_")
+                and not helpers.get_no_module_name(key).startswith(f"{provider_config['name']}_cloudfront")
+                and not helpers.get_no_module_name(key).startswith(f"{provider_config['name']}_route53")
             ):
                 # Replace domain with resource reference
                 return origin_string.replace(domain, key)
     return origin_string
 
 
-def handle_cloudfront_lbs(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def handle_cloudfront_lbs(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Connect CloudFront distributions to load balancers.
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with CloudFront-LB connections
     """
+    GROUP_NODES = provider_config["config"]["GROUP_NODES"]
     # Find CloudFront distributions and load balancers
     cf_distros = sorted(
-        [s for s in tfdata["graphdict"].keys() if "aws_cloudfront" in s]
+        [s for s in tfdata["graphdict"].keys() if f"{provider_config['name']}_cloudfront" in s]
     )
-    lbs = sorted([s for s in tfdata["graphdict"].keys() if "aws_lb." in s])
+    lbs = sorted([s for s in tfdata["graphdict"].keys() if f"{provider_config['name']}_lb." in s])
     # Connect CloudFront to LBs when node connects to both
     for node in sorted(tfdata["graphdict"].keys()):
         connections = tfdata["graphdict"][node]
@@ -175,17 +177,18 @@ def handle_cloudfront_lbs(tfdata: Dict[str, Any]) -> Dict[str, Any]:
     return tfdata
 
 
-def handle_cf_origins(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def handle_cf_origins(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Process CloudFront origin configurations and ACM certificates.
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with CloudFront origins configured
     """
     # Find all CloudFront resources
-    cf_data = [s for s in tfdata["meta_data"].keys() if "aws_cloudfront" in s]
+    cf_data = [s for s in tfdata["meta_data"].keys() if f"{provider_config['name']}_cloudfront" in s]
     if cf_data:
         for cf_resource in cf_data:
             # Process origin configuration
@@ -211,29 +214,30 @@ def handle_cf_origins(tfdata: Dict[str, Any]) -> Dict[str, Any]:
                         in tfdata["meta_data"][cf_resource]["viewer_certificate"]
                     ):
                         tfdata["graphdict"][cf_resource].append(
-                            "aws_acm_certificate.acm"
+                            f"{provider_config['name']}_acm_certificate.acm"
                         )
                     # Link origin domain to resources
                     if origin_domain:
                         tfdata["meta_data"][cf_resource]["origin"] = (
                             handle_cloudfront_domains(
-                                str(origin_source), origin_domain, tfdata["meta_data"]
+                                str(origin_source), origin_domain, tfdata["meta_data"], provider_config
                             )
                         )
     return tfdata
 
 
-def aws_handle_cloudfront_pregraph(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def aws_handle_cloudfront_pregraph(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Pre-process CloudFront resources before graph generation.
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with CloudFront pre-processing complete
     """
-    tfdata = handle_cloudfront_lbs(tfdata)
-    tfdata = handle_cf_origins(tfdata)
+    tfdata = handle_cloudfront_lbs(tfdata, provider_config)
+    tfdata = handle_cf_origins(tfdata, provider_config)
 
     return tfdata
 
@@ -252,11 +256,12 @@ def _add_suffix(s: str) -> str:
     return s
 
 
-def aws_handle_subnet_azs(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def aws_handle_subnet_azs(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Create availability zone nodes and link to subnets.
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with AZ nodes created
@@ -265,7 +270,7 @@ def aws_handle_subnet_azs(tfdata: Dict[str, Any]) -> Dict[str, Any]:
     subnet_resources = [
         k
         for k in tfdata["graphdict"]
-        if helpers.get_no_module_name(k).startswith("aws_subnet")
+        if helpers.get_no_module_name(k).startswith(f"{provider_config['name']}_subnet")
         and k not in tfdata["hidden"]
     ]
     # Process each subnet to create AZ nodes
@@ -276,7 +281,7 @@ def aws_handle_subnet_azs(tfdata: Dict[str, Any]) -> Dict[str, Any]:
             if subnet in tfdata["graphdict"][parent]:
                 tfdata["graphdict"][parent].remove(subnet)
             # Build AZ node name from subnet metadata
-            az = "aws_az.availability_zone_" + str(
+            az = f"{provider_config['name']}_az.availability_zone_" + str(
                 tfdata["original_metadata"][subnet].get("availability_zone")
             )
             az = az.replace("-", "_")
@@ -295,7 +300,7 @@ def aws_handle_subnet_azs(tfdata: Dict[str, Any]) -> Dict[str, Any]:
                     tfdata["meta_data"][subnet].get("count")
                 )
             # Link AZ to subnet if parent is VPC
-            if "aws_vpc" in parent:
+            if f"{provider_config['name']}_vpc" in parent:
                 tfdata["graphdict"][az].append(subnet)
             # Link parent to AZ
             if az not in tfdata["graphdict"][parent]:
@@ -303,21 +308,22 @@ def aws_handle_subnet_azs(tfdata: Dict[str, Any]) -> Dict[str, Any]:
     return tfdata
 
 
-def aws_handle_efs(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def aws_handle_efs(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Handle EFS mount target and file system relationships.
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with EFS relationships configured
     """
     # Find all EFS file systems and mount targets
     efs_systems = helpers.list_of_dictkeys_containing(
-        tfdata["graphdict"], "aws_efs_file_system"
+        tfdata["graphdict"], f"{provider_config['name']}_efs_file_system"
     )
     efs_mount_targets = helpers.list_of_dictkeys_containing(
-        tfdata["graphdict"], "aws_efs_mount_target"
+        tfdata["graphdict"], f"{provider_config['name']}_efs_mount_target"
     )
     # Link mount targets to file systems
     for target in efs_mount_targets:
@@ -327,7 +333,7 @@ def aws_handle_efs(tfdata: Dict[str, Any]) -> Dict[str, Any]:
             # Clean up file system connections
             for fs_connection in sorted(list(tfdata["graphdict"][fs])):
                 if helpers.get_no_module_name(fs_connection).startswith(
-                    "aws_efs_mount_target"
+                    f"{provider_config['name']}_efs_mount_target"
                 ):
                     # Remove mount target from file system
                     tfdata["graphdict"][fs].remove(fs_connection)
@@ -338,10 +344,10 @@ def aws_handle_efs(tfdata: Dict[str, Any]) -> Dict[str, Any]:
     # Replace EFS file system references with mount target
     for node in sorted(tfdata["graphdict"].keys()):
         connections = tfdata["graphdict"][node]
-        if helpers.consolidated_node_check(node):
+        if helpers.consolidated_node_check(node, provider_config):
             for connection in list(connections):
                 if helpers.get_no_module_name(connection).startswith(
-                    "aws_efs_file_system"
+                    f"{provider_config['name']}_efs_file_system"
                 ):
                     # Use first mount target as replacement
                     target = efs_mount_targets[0].split("~")[0]
@@ -351,25 +357,26 @@ def aws_handle_efs(tfdata: Dict[str, Any]) -> Dict[str, Any]:
     return tfdata
 
 
-def handle_indirect_sg_rules(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def handle_indirect_sg_rules(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Handle indirect security group associations via SG rules.
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with indirect SG rules resolved
     """
     # Find all security groups
     sglist = helpers.list_of_dictkeys_containing(
-        tfdata["graphdict"], "aws_security_group."
+        tfdata["graphdict"], f"{provider_config['name']}_security_group."
     )
     # Process each security group
     for sg in sorted(sglist):
         for sg_connection in sorted(list(tfdata["graphdict"][sg])):
             # Check if connection is a security group rule
             if helpers.get_no_module_name(sg_connection).startswith(
-                "aws_security_group_rule"
+                f"{provider_config['name']}_security_group_rule"
             ):
                 # Find the actual resource the rule connects to
                 matched_resource = helpers.find_resource_containing(
@@ -384,25 +391,27 @@ def handle_indirect_sg_rules(tfdata: Dict[str, Any]) -> Dict[str, Any]:
     return tfdata
 
 
-def handle_sg_relationships(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def handle_sg_relationships(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Process security group relationships and reverse connections.
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with SG relationships configured
     """
+    GROUP_NODES = provider_config["config"]["GROUP_NODES"]
     # Find all resources that reference security groups
     all_sg_parents = helpers.list_of_parents(
-        tfdata["graphdict"], "aws_security_group.*"
+        tfdata["graphdict"], f"{provider_config['name']}_security_group.*"
     )
     # Filter to non-SG resources and sort for deterministic order
     bound_nodes = sorted(
         [
             s
             for s in all_sg_parents
-            if not helpers.get_no_module_name(s).startswith("aws_security_group")
+            if not helpers.get_no_module_name(s).startswith(f"{provider_config['name']}_security_group")
         ]
     )
     # Process each resource bound to a security group
@@ -410,11 +419,11 @@ def handle_sg_relationships(tfdata: Dict[str, Any]) -> Dict[str, Any]:
         target_type = helpers.get_no_module_name(target).split(".")[0]
         sg_to_purge = list()
         # Reverse SG relationships for non-group nodes
-        if target_type not in GROUP_NODES and target_type != "aws_security_group_rule":
+        if target_type not in GROUP_NODES and target_type != f"{provider_config['name']}_security_group_rule":
             for connection in sorted(list(tfdata["graphdict"][target])):
                 if (
                     helpers.get_no_module_name(connection).startswith(
-                        "aws_security_group."
+                        f"{provider_config['name']}_security_group."
                     )
                     and connection in tfdata["graphdict"].keys()
                     and tfdata["graphdict"][connection]
@@ -441,7 +450,7 @@ def handle_sg_relationships(tfdata: Dict[str, Any]) -> Dict[str, Any]:
                     tfdata["graphdict"][target] = newlist
                 elif (
                     helpers.get_no_module_name(connection).startswith(
-                        "aws_security_group."
+                        f"{provider_config['name']}_security_group."
                     )
                     and connection in tfdata["graphdict"].keys()
                     and len(tfdata["graphdict"][connection]) == 0
@@ -451,7 +460,7 @@ def handle_sg_relationships(tfdata: Dict[str, Any]) -> Dict[str, Any]:
                     tfdata["graphdict"][connection].append(target)
         # Remove Security Group Rules from associations with the security group
         # This will ensure only nodes that are protected with a security group are drawn with the red boundary
-        if target_type == "aws_security_group_rule":
+        if target_type == f"{provider_config['name']}_security_group_rule":
             for connection in sorted(list(tfdata["graphdict"][target])):
                 if (
                     connection in tfdata["graphdict"].keys()
@@ -471,7 +480,7 @@ def handle_sg_relationships(tfdata: Dict[str, Any]) -> Dict[str, Any]:
             [
                 k
                 for k in references
-                if helpers.get_no_module_name(k).startswith("aws_security_group")
+                if helpers.get_no_module_name(k).startswith(f"{provider_config['name']}_security_group")
             ]
         )
         if replacement_sgs:
@@ -480,11 +489,11 @@ def handle_sg_relationships(tfdata: Dict[str, Any]) -> Dict[str, Any]:
                     if (
                         target in tfdata["graphdict"][node]
                         and not helpers.get_no_module_name(node).startswith(
-                            "aws_security_group"
+                            f"{provider_config['name']}_security_group"
                         )
                         and helpers.get_no_module_name(node).split(".")[0]
                         in GROUP_NODES
-                        and not helpers.get_no_module_name(node).startswith("aws_vpc")
+                        and not helpers.get_no_module_name(node).startswith(f"{provider_config['name']}_vpc")
                         and replaced_group not in tfdata["graphdict"][node]
                     ):
                         tfdata["graphdict"][node].remove(target)
@@ -492,16 +501,17 @@ def handle_sg_relationships(tfdata: Dict[str, Any]) -> Dict[str, Any]:
     return tfdata
 
 
-def duplicate_sg_connections(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def duplicate_sg_connections(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Handle duplicate security group connections.
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with duplicate SG connections resolved
     """
-    results = helpers.find_common_elements(tfdata["graphdict"], "aws_security_group.")
+    results = helpers.find_common_elements(tfdata["graphdict"], f"{provider_config['name']}_security_group.")
     for i in range(0, len(results)):
         sg2 = results[i][1]
         common = results[i][2]
@@ -511,22 +521,23 @@ def duplicate_sg_connections(tfdata: Dict[str, Any]) -> Dict[str, Any]:
     return tfdata
 
 
-def aws_handle_sg(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def aws_handle_sg(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Main handler for AWS security group processing.
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with all SG relationships configured
     """
     # Handle indirect association to resources via SG rule
-    tfdata = handle_indirect_sg_rules(tfdata)
+    tfdata = handle_indirect_sg_rules(tfdata, provider_config)
     # Main handler for SG relationships
-    tfdata = handle_sg_relationships(tfdata)
+    tfdata = handle_sg_relationships(tfdata, provider_config)
     # Link subnets to security groups
     list_of_sgs = helpers.list_of_dictkeys_containing(
-        tfdata["graphdict"], "aws_security_group."
+        tfdata["graphdict"], f"{provider_config['name']}_security_group."
     )
     for sg in list_of_sgs:
         for sg_connection in sorted(list(tfdata["graphdict"][sg])):
@@ -536,7 +547,7 @@ def aws_handle_sg(tfdata: Dict[str, Any]) -> Dict[str, Any]:
             # Add SG to parent subnets
             for parent in parent_list:
                 if (
-                    helpers.get_no_module_name(parent).startswith("aws_subnet")
+                    helpers.get_no_module_name(parent).startswith(f"{provider_config['name']}_subnet")
                     and sg not in tfdata["graphdict"][parent]
                     and sg + "~1" not in parent_list
                 ):
@@ -548,7 +559,7 @@ def aws_handle_sg(tfdata: Dict[str, Any]) -> Dict[str, Any]:
         parent_list = sorted(helpers.list_of_parents(tfdata["graphdict"], sg))
         for parent in parent_list:
             if (
-                helpers.get_no_module_name(parent).startswith("aws_vpc")
+                helpers.get_no_module_name(parent).startswith(f"{provider_config['name']}_vpc")
                 and sg in tfdata["graphdict"][parent]
             ):
                 tfdata["graphdict"][parent].remove(sg)
@@ -564,57 +575,62 @@ def aws_handle_sg(tfdata: Dict[str, Any]) -> Dict[str, Any]:
     return tfdata
 
 
-def aws_handle_sharedgroup(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def aws_handle_sharedgroup(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Group shared AWS services into a shared services group.
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with shared services grouped
     """
+    SHARED_SERVICES = provider_config["config"]["SHARED_SERVICES"]
     # Find all shared services and group them
     for node in sorted(tfdata["graphdict"].keys()):
         substring_match = [s for s in SHARED_SERVICES if s in node]
         if substring_match:
             # Create shared services group if needed
-            if not tfdata["graphdict"].get("aws_group.shared_services"):
-                tfdata["graphdict"]["aws_group.shared_services"] = []
-                tfdata["meta_data"]["aws_group.shared_services"] = {}
+            if not tfdata["graphdict"].get(f"{provider_config['name']}_group.shared_services"):
+                tfdata["graphdict"][f"{provider_config['name']}_group.shared_services"] = []
+                tfdata["meta_data"][f"{provider_config['name']}_group.shared_services"] = {}
             # Add node to shared services group
-            if node not in tfdata["graphdict"]["aws_group.shared_services"]:
-                tfdata["graphdict"]["aws_group.shared_services"].append(node)
+            if node not in tfdata["graphdict"][f"{provider_config['name']}_group.shared_services"]:
+                tfdata["graphdict"][f"{provider_config['name']}_group.shared_services"].append(node)
     # Replace consolidated nodes with their consolidated names
-    if tfdata["graphdict"].get("aws_group.shared_services"):
-        for service in sorted(list(tfdata["graphdict"]["aws_group.shared_services"])):
-            if helpers.consolidated_node_check(service) and "cluster" not in service:
-                tfdata["graphdict"]["aws_group.shared_services"] = list(
+    if tfdata["graphdict"].get(f"{provider_config['name']}_group.shared_services"):
+        for service in sorted(list(tfdata["graphdict"][f"{provider_config['name']}_group.shared_services"])):
+            if helpers.consolidated_node_check(service, provider_config) and "cluster" not in service:
+                tfdata["graphdict"][f"{provider_config['name']}_group.shared_services"] = list(
                     map(
                         lambda x: x.replace(
-                            service, helpers.consolidated_node_check(service)
+                            service, helpers.consolidated_node_check(service, provider_config)
                         ),
-                        tfdata["graphdict"]["aws_group.shared_services"],
+                        tfdata["graphdict"][f"{provider_config['name']}_group.shared_services"],
                     )
                 )
     return tfdata
 
 
-def aws_handle_lb(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def aws_handle_lb(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Handle load balancer type variants and connections.
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with LB variants configured
     """
+    SHARED_SERVICES = provider_config["config"]["SHARED_SERVICES"]
+    GROUP_NODES = provider_config["config"]["GROUP_NODES"]
     # Find all load balancers
     found_lbs = sorted(
-        helpers.list_of_dictkeys_containing(tfdata["graphdict"], "aws_lb")
+        helpers.list_of_dictkeys_containing(tfdata["graphdict"], f"{provider_config['name']}_lb")
     )
     for lb in found_lbs:
         # Determine LB type (ALB, NLB, etc.)
-        lb_type = helpers.check_variant(lb, tfdata["meta_data"][lb])
+        lb_type = helpers.check_variant(lb, tfdata["meta_data"][lb], provider_config)
         renamed_node = lb_type + "." + "elb"
         # Initialize renamed node metadata
         if not tfdata["meta_data"].get(renamed_node):
@@ -632,8 +648,8 @@ def aws_handle_lb(tfdata: Dict[str, Any]) -> Dict[str, Any]:
                 or tfdata["meta_data"][connection].get("desired_count")
             ) and connection.split(".")[0] not in SHARED_SERVICES:
                 # Sets LB count to the max of the count of any dependencies
-                if int(tfdata["meta_data"][connection]["count"]) > int(
-                    tfdata["meta_data"][renamed_node]["count"]
+                if tfdata["meta_data"].get(connection) and tfdata["meta_data"].get(renamed_node) and int(tfdata["meta_data"][connection].get("count", 0)) > int(
+                    tfdata["meta_data"][renamed_node].get("count", 0)
                 ):
                     tfdata["meta_data"][renamed_node]["count"] = int(
                         tfdata["meta_data"][connection]["count"]
@@ -652,7 +668,7 @@ def aws_handle_lb(tfdata: Dict[str, Any]) -> Dict[str, Any]:
                 if (
                     p_type in GROUP_NODES
                     and p_type not in SHARED_SERVICES
-                    and p_type != "aws_vpc"
+                    and p_type != f"{provider_config['name']}_vpc"
                 ):
                     tfdata["graphdict"][p].append(renamed_node)
                     tfdata["graphdict"][p].remove(lb)
@@ -660,25 +676,26 @@ def aws_handle_lb(tfdata: Dict[str, Any]) -> Dict[str, Any]:
     return tfdata
 
 
-def aws_handle_dbsubnet(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def aws_handle_dbsubnet(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Handle RDS database subnet group relationships.
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with DB subnet groups configured
     """
     # Find all DB subnet groups
     db_subnet_list = helpers.list_of_dictkeys_containing(
-        tfdata["graphdict"], "aws_db_subnet_group"
+        tfdata["graphdict"], f"{provider_config['name']}_db_subnet_group"
     )
     for dbsubnet in db_subnet_list:
         db_grouping = helpers.list_of_parents(tfdata["graphdict"], dbsubnet)
         if db_grouping:
             # Move DB subnet group from subnet to VPC level
             for subnet in db_grouping:
-                if helpers.get_no_module_name(subnet).startswith("aws_subnet"):
+                if helpers.get_no_module_name(subnet).startswith(f"{provider_config['name']}_subnet"):
                     tfdata["graphdict"][subnet].remove(dbsubnet)
                     # Navigate up to VPC through AZ
                     az = helpers.list_of_parents(tfdata["graphdict"], subnet)[0]
@@ -690,7 +707,7 @@ def aws_handle_dbsubnet(tfdata: Dict[str, Any]) -> Dict[str, Any]:
                 rds_references = helpers.list_of_parents(tfdata["graphdict"], rds)
                 for check_sg in rds_references:
                     if helpers.get_no_module_name(check_sg).startswith(
-                        "aws_security_group"
+                        f"{provider_config['name']}_security_group"
                     ):
                         tfdata["graphdict"][vpc].remove(dbsubnet)
                         tfdata["graphdict"][vpc].append(check_sg)
@@ -698,21 +715,22 @@ def aws_handle_dbsubnet(tfdata: Dict[str, Any]) -> Dict[str, Any]:
     return tfdata
 
 
-def aws_handle_vpcendpoints(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def aws_handle_vpcendpoints(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Move VPC endpoints into VPC parent.
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with VPC endpoints moved
     """
     # Find all VPC endpoints
     vpc_endpoints = helpers.list_of_dictkeys_containing(
-        tfdata["graphdict"], "aws_vpc_endpoint"
+        tfdata["graphdict"], f"{provider_config['name']}_vpc_endpoint"
     )
     # Get the VPC node
-    vpc = helpers.list_of_dictkeys_containing(tfdata["graphdict"], "aws_vpc.")[0]
+    vpc = helpers.list_of_dictkeys_containing(tfdata["graphdict"], f"{provider_config['name']}_vpc.")[0]
     # Move endpoints into VPC and remove as separate nodes
     for vpc_endpoint in vpc_endpoints:
         tfdata["graphdict"][vpc].append(vpc_endpoint)
@@ -720,32 +738,34 @@ def aws_handle_vpcendpoints(tfdata: Dict[str, Any]) -> Dict[str, Any]:
     return tfdata
 
 
-def aws_handle_ecs(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def aws_handle_ecs(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Handle ECS service configurations.
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with ECS configured
     """
-    # eks_nodes = helpers.list_of_parents(tfdata["graphdict"], "aws_eks_cluster")
+    # eks_nodes = helpers.list_of_parents(tfdata["graphdict"], f"{provider_config['name']}_eks_cluster")
     ecs_nodes = helpers.list_of_dictkeys_containing(
-        tfdata["graphdict"], "aws_ecs_service"
+        tfdata["graphdict"], f"{provider_config['name']}_ecs_service"
     )
     # for ecs in ecs_nodes:
     #     tfdata["meta_data"][ecs]["count"] = 3
-    # ecs_nodes = helpers.list_of_parents(tfdata["graphdict"], "aws_ek_cluster")
+    # ecs_nodes = helpers.list_of_parents(tfdata["graphdict"], f"{provider_config['name']}_ek_cluster")
     # for eks in eks_nodes:
     #     del tfdata["graphdict"][eks]
     return tfdata
 
 
-def random_string_handler(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def random_string_handler(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Remove random string resources from graph.
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration (unused)
 
     Returns:
         Updated tfdata with random strings removed
@@ -756,35 +776,37 @@ def random_string_handler(tfdata: Dict[str, Any]) -> Dict[str, Any]:
     return tfdata
 
 
-def match_resources(tfdata: Dict[str, Any]) -> Dict[str, Any]:
+def match_resources(tfdata: Dict[str, Any], provider_config: ProviderConfig) -> Dict[str, Any]:
     """Match resources based on suffix patterns and dependencies.
 
     Args:
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated tfdata with resources matched
     """
     # Match AZs to subnets by suffix
-    tfdata["graphdict"] = match_az_to_subnets(tfdata["graphdict"])
+    tfdata["graphdict"] = match_az_to_subnets(tfdata["graphdict"], provider_config)
     # Match security groups to subnets by suffix
-    tfdata["graphdict"] = match_sg_to_subnets(tfdata["graphdict"])
+    tfdata["graphdict"] = match_sg_to_subnets(tfdata["graphdict"], provider_config)
     # Link EC2 instances to IAM roles
-    tfdata["graphdict"] = link_ec2_to_iam_roles(tfdata["graphdict"])
+    tfdata["graphdict"] = link_ec2_to_iam_roles(tfdata["graphdict"], provider_config)
     # Split NAT gateways per subnet
-    tfdata["graphdict"] = split_nat_gateways(tfdata["graphdict"])
+    tfdata["graphdict"] = split_nat_gateways(tfdata["graphdict"], provider_config)
     # Remove generic subnet references
-    tfdata["graphdict"] = _remove_consolidated_subnet_refs(tfdata["graphdict"])
+    tfdata["graphdict"] = _remove_consolidated_subnet_refs(tfdata["graphdict"], provider_config)
     return tfdata
 
 
 def _remove_consolidated_subnet_refs(
-    graphdict: Dict[str, List[str]],
+    graphdict: Dict[str, List[str]], provider_config: ProviderConfig
 ) -> Dict[str, List[str]]:
     """Remove generic consolidated subnet references from VPC.
 
     Args:
         graphdict: Resource graph dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated graphdict with consolidated subnets removed
@@ -792,22 +814,23 @@ def _remove_consolidated_subnet_refs(
 
     # Remove generic subnet references from VPCs
     for resource in list(graphdict.keys()):
-        if "aws_vpc" in resource:
+        if f"{provider_config['name']}_vpc" in resource:
             # Keep only numbered subnets and non-subnet resources
             graphdict[resource] = [
                 conn
                 for conn in graphdict[resource]
-                if not ("aws_subnet" in conn and "~" not in conn and "[" not in conn)
+                if not (f"{provider_config['name']}_subnet" in conn and "~" not in conn and "[" not in conn)
             ]
 
     return graphdict
 
 
-def split_nat_gateways(terraform_data: Dict[str, List[str]]) -> Dict[str, List[str]]:
+def split_nat_gateways(terraform_data: Dict[str, List[str]], provider_config: ProviderConfig) -> Dict[str, List[str]]:
     """Split NAT gateways into numbered instances per subnet.
 
     Args:
         terraform_data: Resource graph dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated graph with numbered NAT gateways
@@ -817,7 +840,7 @@ def split_nat_gateways(terraform_data: Dict[str, List[str]]) -> Dict[str, List[s
 
     # Find unnumbered NAT gateways
     nat_gateways = sorted(
-        [k for k in terraform_data.keys() if "aws_nat_gateway" in k and "~" not in k]
+        [k for k in terraform_data.keys() if f"{provider_config['name']}_nat_gateway" in k and "~" not in k]
     )
 
     for nat_gw in nat_gateways:
@@ -847,7 +870,7 @@ def split_nat_gateways(terraform_data: Dict[str, List[str]]) -> Dict[str, List[s
                 suffix = match.group(1)
                 new_deps = []
                 for dep in deps:
-                    if "aws_nat_gateway" in dep and "~" not in dep:
+                    if f"{provider_config['name']}_nat_gateway" in dep and "~" not in dep:
                         new_deps.append(f"{dep}~{suffix}")
                     else:
                         new_deps.append(dep)
@@ -856,11 +879,12 @@ def split_nat_gateways(terraform_data: Dict[str, List[str]]) -> Dict[str, List[s
     return result
 
 
-def link_ec2_to_iam_roles(terraform_data: Dict[str, List[str]]) -> Dict[str, List[str]]:
+def link_ec2_to_iam_roles(terraform_data: Dict[str, List[str]], provider_config: ProviderConfig) -> Dict[str, List[str]]:
     """Link EC2 instances to IAM roles via instance profiles.
 
     Args:
         terraform_data: Resource graph dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated graph with EC2-IAM links
@@ -870,27 +894,28 @@ def link_ec2_to_iam_roles(terraform_data: Dict[str, List[str]]) -> Dict[str, Lis
     # Map instance profiles to IAM roles
     profile_to_role = {}
     for resource, deps in sorted(terraform_data.items()):
-        if "aws_iam_role" in resource:
+        if f"{provider_config['name']}_iam_role" in resource:
             for dep in deps:
-                if "aws_iam_instance_profile" in dep:
+                if f"{provider_config['name']}_iam_instance_profile" in dep:
                     profile_to_role[dep] = resource
 
     # Find instance profiles that connect to EC2 instances and add EC2 to IAM role deps
     for resource, deps in sorted(terraform_data.items()):
-        if "aws_iam_instance_profile" in resource and resource in profile_to_role:
+        if f"{provider_config['name']}_iam_instance_profile" in resource and resource in profile_to_role:
             iam_role = profile_to_role[resource]
             for dep in deps:
-                if "aws_instance" in dep and dep not in result[iam_role]:
+                if f"{provider_config['name']}_instance" in dep and dep not in result[iam_role]:
                     result[iam_role].append(dep)
 
     return result
 
 
-def link_sqs_queue_policy(terraform_data: Dict[str, List[str]]) -> Dict[str, List[str]]:
+def link_sqs_queue_policy(terraform_data: Dict[str, List[str]], provider_config: ProviderConfig) -> Dict[str, List[str]]:
     """Link SQS queues to resources via queue policies.
 
     Args:
         terraform_data: Resource graph dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated graph with SQS queue links
@@ -900,26 +925,27 @@ def link_sqs_queue_policy(terraform_data: Dict[str, List[str]]) -> Dict[str, Lis
     # Map queue policies to SQS queues
     policy_to_queue = {}
     for resource, deps in sorted(terraform_data.items()):
-        if "aws_sqs_queue" in resource:
+        if f"{provider_config['name']}_sqs_queue" in resource:
             for dep in deps:
-                if "aws_sqs_queue_policy" in dep:
+                if f"{provider_config['name']}_sqs_queue_policy" in dep:
                     policy_to_queue[dep] = resource
 
     # Find queue policies that connect to resources and add SQS queue to those resource deps
     for resource, deps in sorted(terraform_data.items()):
         for dep in deps:
-            if "aws_sqs_queue_policy." in dep and dep in policy_to_queue:
+            if f"{provider_config['name']}_sqs_queue_policy." in dep and dep in policy_to_queue:
                 sqs_queue = policy_to_queue[dep]
                 if sqs_queue not in result[resource]:
                     result[resource].append(sqs_queue)
     return result
 
 
-def match_az_to_subnets(terraform_data: Dict[str, List[str]]) -> Dict[str, List[str]]:
+def match_az_to_subnets(terraform_data: Dict[str, List[str]], provider_config: ProviderConfig) -> Dict[str, List[str]]:
     """Match availability zones to subnets by suffix pattern.
 
     Args:
         terraform_data: Resource graph dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated graph with AZ-subnet matches
@@ -934,7 +960,7 @@ def match_az_to_subnets(terraform_data: Dict[str, List[str]]) -> Dict[str, List[
         [
             key
             for key in terraform_data.keys()
-            if key.startswith("aws_az.availability_zone")
+            if key.startswith(f"{provider_config['name']}_az.availability_zone")
         ]
     )
 
@@ -953,7 +979,7 @@ def match_az_to_subnets(terraform_data: Dict[str, List[str]]) -> Dict[str, List[
         # Filter subnets with matching suffix
         matched_subnets = []
         for dep in az_dependencies:
-            if "subnet" in dep.lower():
+            if "subnet" in dep.lower() and dep.startswith(f"{provider_config['name']}_subnet"):
                 dep_match = re.search(suffix_pattern, dep)
                 if dep_match and dep_match.group(1) == az_suffix:
                     matched_subnets.append(dep)
@@ -964,11 +990,12 @@ def match_az_to_subnets(terraform_data: Dict[str, List[str]]) -> Dict[str, List[
     return result
 
 
-def match_sg_to_subnets(terraform_data: Dict[str, List[str]]) -> Dict[str, List[str]]:
+def match_sg_to_subnets(terraform_data: Dict[str, List[str]], provider_config: ProviderConfig) -> Dict[str, List[str]]:
     """Match security groups to subnets by suffix pattern.
 
     Args:
         terraform_data: Resource graph dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         Updated graph with SG-subnet matches
@@ -979,7 +1006,7 @@ def match_sg_to_subnets(terraform_data: Dict[str, List[str]]) -> Dict[str, List[
     # Group subnets by base name and collect SGs
     subnet_groups = {}
     for key in sorted(terraform_data.keys()):
-        if "aws_subnet" in key.lower():
+        if f"{provider_config['name']}_subnet" in key.lower():
             # Extract base name without suffix
             base_name = re.sub(r"\[\d+\]~\d+$", "", key)
             if base_name not in subnet_groups:
@@ -988,7 +1015,7 @@ def match_sg_to_subnets(terraform_data: Dict[str, List[str]]) -> Dict[str, List[
 
             # Collect SG base names from subnet dependencies
             for dep in terraform_data.get(key, []):
-                if "aws_security_group" in dep:
+                if f"{provider_config['name']}_security_group" in dep:
                     sg_base = re.sub(r"~\d+$", "", dep)
                     subnet_groups[base_name]["sg_bases"].add(sg_base)
 

@@ -15,18 +15,11 @@ from typing import Dict, List, Any, Tuple, Optional, Union
 
 import click
 
-import modules.cloud_config as cloud_config
+from modules.provider_registry import ProviderConfig
 import modules.helpers as helpers
 
-
-REVERSE_ARROW_LIST = cloud_config.AWS_REVERSE_ARROW_LIST
-IMPLIED_CONNECTIONS = cloud_config.AWS_IMPLIED_CONNECTIONS
-GROUP_NODES = cloud_config.AWS_GROUP_NODES
-CONSOLIDATED_NODES = cloud_config.AWS_CONSOLIDATED_NODES
-NODE_VARIANTS = cloud_config.AWS_NODE_VARIANTS
-SPECIAL_RESOURCES = cloud_config.AWS_SPECIAL_RESOURCES
-ACRONYMS_LIST = cloud_config.AWS_ACRONYMS_LIST
-NAME_REPLACEMENTS = cloud_config.AWS_NAME_REPLACEMENTS
+# Removed direct imports and reassignments of AWS_* constants.
+# These will be accessed via the passed provider_config.
 
 # List of dictionary sections to output in log
 output_sections = ["locals", "module", "resource", "data", "output"]
@@ -428,16 +421,23 @@ def remove_brackets_and_numbers(input_string: str) -> str:
     return output_string
 
 
-def pretty_name(name: str, show_title=True) -> str:
+def pretty_name(name: str, show_title=True, provider_config: Optional[ProviderConfig] = None) -> str:
     """
     Beautification for AWS Labels
     """
+    ACRONYMS_LIST = provider_config["config"]["ACRONYMS_LIST"] if provider_config else []
+    NAME_REPLACEMENTS = provider_config["config"]["NAME_REPLACEMENTS"] if provider_config else {}
+
     resourcename = ""
     if "null_" in name or "random" in name or "time_sleep" in name:
         return "Null"
     else:
-        name = name.replace("tv_aws_", "")
-        name = name.replace("aws_", "")
+        # Check against provider's name to remove prefix
+        if provider_config and name.startswith(f"{provider_config['name']}_"):
+            name = name.replace(f"{provider_config['name']}_", "")
+        else: # Fallback to aws_ if no provider_config or generic
+            name = name.replace("tv_aws_", "")
+            name = name.replace("aws_", "")
     name = get_no_module_name(name)
     servicename = name.split(".")[0]
     service_label = name.split(".")[-1]
@@ -730,16 +730,18 @@ def remove_recursive(graphdict: Dict[str, List[str]]) -> Dict[str, List[str]]:
     return graphdict
 
 
-def check_variant(resource: str, metadata: Dict[str, Any]) -> Union[str, bool]:
+def check_variant(resource: str, metadata: Dict[str, Any], provider_config: ProviderConfig) -> Union[str, bool]:
     """Check if resource has a variant suffix based on metadata.
 
     Args:
         resource: Resource name
         metadata: Resource metadata
+        provider_config: The primary provider configuration
 
     Returns:
         Variant name or False
     """
+    NODE_VARIANTS = provider_config["config"]["NODE_VARIANTS"]
     for variant_service in NODE_VARIANTS:
         if resource.startswith(variant_service):
             for keyword in NODE_VARIANTS[variant_service]:
@@ -865,15 +867,17 @@ def any_parent_has_count(tfdata: Dict[str, Any], target_resource: str) -> bool:
     return any_parent_has_count
 
 
-def consolidated_node_check(resource_type: str) -> Union[str, bool]:
+def consolidated_node_check(resource_type: str, provider_config: ProviderConfig) -> Union[str, bool]:
     """Check if resource should be consolidated into a standard node.
 
     Args:
         resource_type: Resource type to check
+        provider_config: The primary provider configuration
 
     Returns:
         Consolidated node name or False
     """
+    CONSOLIDATED_NODES = provider_config["config"]["CONSOLIDATED_NODES"]
     for checknode in CONSOLIDATED_NODES:
         prefix = str(list(checknode.keys())[0])
         if get_no_module_name(resource_type).startswith(prefix) and resource_type:

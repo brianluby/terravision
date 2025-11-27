@@ -10,59 +10,38 @@ import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional
-
+import inspect
 import click
 
-import modules.cloud_config as cloud_config
 import modules.helpers as helpers
-
-# pylint: disable=unused-wildcard-import
+from modules.provider_registry import ProviderConfig
 from resource_classes import *
-from resource_classes.aws.analytics import *
-from resource_classes.aws.ar import *
-from resource_classes.aws.blockchain import *
-from resource_classes.aws.business import *
-from resource_classes.aws.compute import *
-from resource_classes.aws.cost import *
-from resource_classes.aws.database import *
-from resource_classes.aws.devtools import *
-from resource_classes.aws.enablement import *
-from resource_classes.aws.enduser import *
-from resource_classes.aws.engagement import *
-from resource_classes.aws.game import *
-from resource_classes.aws.general import *
-from resource_classes.aws.groups import *
-from resource_classes.aws.integration import *
-from resource_classes.aws.iot import *
-from resource_classes.aws.management import *
-from resource_classes.aws.media import *
-from resource_classes.aws.migration import *
-from resource_classes.aws.ml import *
-from resource_classes.aws.mobile import *
-from resource_classes.aws.network import *
-from resource_classes.aws.quantum import *
-from resource_classes.aws.robotics import *
-from resource_classes.aws.satellite import *
-from resource_classes.aws.security import *
-from resource_classes.aws.storage import *
-from resource_classes.generic.blank import Blank
+from resource_classes.aws.groups import AWSgroup # Keep AWSgroup for now until Epic 4
 
-avl_classes = dir()
+# Removed direct imports of AWS specific resource classes,
+# these will be dynamically loaded via provider_config later.
 
-CONSOLIDATED_NODES = cloud_config.AWS_CONSOLIDATED_NODES
-GROUP_NODES = cloud_config.AWS_GROUP_NODES
-DRAW_ORDER = cloud_config.AWS_DRAW_ORDER
-NODE_VARIANTS = cloud_config.AWS_NODE_VARIANTS
-OUTER_NODES = cloud_config.AWS_OUTER_NODES
-AUTO_ANNOTATIONS = cloud_config.AWS_AUTO_ANNOTATIONS
-OUTER_NODES = cloud_config.AWS_OUTER_NODES
-EDGE_NODES = cloud_config.AWS_EDGE_NODES
-SHARED_SERVICES = cloud_config.AWS_SHARED_SERVICES
-ALWAYS_DRAW_LINE = cloud_config.AWS_ALWAYS_DRAW_LINE
-NEVER_DRAW_LINE = cloud_config.AWS_NEVER_DRAW_LINE
+# These will be accessed via the passed provider_config.
+# CONSOLIDATED_NODES = cloud_config.AWS_CONSOLIDATED_NODES
+# GROUP_NODES = cloud_config.AWS_GROUP_NODES
+# DRAW_ORDER = cloud_config.AWS_DRAW_ORDER
+# NODE_VARIANTS = cloud_config.AWS_NODE_VARIANTS
+# OUTER_NODES = cloud_config.AWS_OUTER_NODES
+# AUTO_ANNOTATIONS = cloud_config.AWS_AUTO_ANNOTATIONS
+# OUTER_NODES = cloud_config.AWS_OUTER_NODES
+# EDGE_NODES = cloud_config.AWS_EDGE_NODES
+# SHARED_SERVICES = cloud_config.AWS_SHARED_SERVICES
+# ALWAYS_DRAW_LINE = cloud_config.AWS_ALWAYS_DRAW_LINE
+# NEVER_DRAW_LINE = cloud_config.AWS_NEVER_DRAW_LINE
+
+# Dynamically populate avl_classes based on available resource classes
+# For Epic 1, this will still be AWS focused
+# This needs to be moved into render_diagram and made provider specific in Epic 4
+# avl_classes = [name for name, obj in inspect.getmembers(sys.modules[__name__]) if inspect.isclass(obj) and issubclass(obj, Node)]
 
 
-def get_edge_labels(origin: Node, destination: Node, tfdata: Dict[str, Any]) -> str:
+
+def get_edge_labels(origin: Node, destination: Node, tfdata: Dict[str, Any], provider_config: ProviderConfig) -> str:
     """Extract custom edge labels for connections between nodes.
 
     Searches for user-defined edge labels in metadata, handling both direct
@@ -72,10 +51,12 @@ def get_edge_labels(origin: Node, destination: Node, tfdata: Dict[str, Any]) -> 
         origin: Source node object
         destination: Destination node object
         tfdata: Terraform data dictionary containing meta_data with edge_labels
+        provider_config: The primary provider configuration
 
     Returns:
         Label string for the edge, or empty string if no label found
     """
+    CONSOLIDATED_NODES = provider_config["config"]["CONSOLIDATED_NODES"]
     label = ""
     origin_resource = origin._attrs["tf_resource_name"]
     dest_resource = destination._attrs["tf_resource_name"]
@@ -130,6 +111,8 @@ def handle_nodes(
     diagramCanvas: Canvas,
     tfdata: Dict[str, Any],
     drawn_resources: List[str],
+    avl_classes: List[str],
+    provider_config: ProviderConfig,
 ) -> Tuple[Node, List[str]]:
     """Recursively draw nodes and their connections in the diagram.
 
@@ -143,13 +126,18 @@ def handle_nodes(
         diagramCanvas: Root canvas object for the diagram
         tfdata: Terraform data dictionary with graphdict and meta_data
         drawn_resources: List of already drawn resource names
+        avl_classes: List of available resource class names
+        provider_config: The primary provider configuration
 
     Returns:
         Tuple of (created Node object, updated drawn_resources list)
     """
+    OUTER_NODES = provider_config["config"]["OUTER_NODES"]
+    GROUP_NODES = provider_config["config"]["GROUP_NODES"]
+
     resource_type = helpers.get_no_module_name(resource).split(".")[0]
     if resource_type not in avl_classes:
-        return
+        return None, drawn_resources # Return None for newNode if class is not available
 
     # Reuse existing node if already drawn
     if resource in drawn_resources:
@@ -157,9 +145,15 @@ def handle_nodes(
     else:
         # Create new node and add to appropriate group
         targetGroup = diagramCanvas if resource_type in OUTER_NODES else inGroup
-        node_label = helpers.pretty_name(resource)
+        node_label = helpers.pretty_name(resource, provider_config=provider_config)
         setcluster(targetGroup)
-        nodeClass = getattr(sys.modules[__name__], resource_type)
+        
+        # Dynamically get the class from resource_classes.aws or generic
+        nodeClass = globals().get(resource_type) # Try to get class from globals (where resource_classes are loaded)
+        if not nodeClass:
+            # Fallback to Blank node if not found in globals
+            nodeClass = Blank 
+
         newNode = nodeClass(label=node_label, tf_resource_name=resource)
         drawn_resources.append(resource)
         tfdata["meta_data"].update({resource: {"node": newNode}})
@@ -198,12 +192,16 @@ def handle_nodes(
                             diagramCanvas,
                             tfdata,
                             drawn_resources,
+                            avl_classes,
+                            provider_config,
                         )
                     elif node_connection not in drawn_resources:
                         # Draw circular reference node without recursion
-                        nodeClass = getattr(sys.modules[__name__], node_type)
+                        nodeClass = globals().get(node_type)
+                        if not nodeClass:
+                            nodeClass = Blank
                         connectedNode = nodeClass(
-                            label=helpers.pretty_name(node_connection),
+                            label=helpers.pretty_name(node_connection, provider_config=provider_config),
                             tf_resource_name=node_connection,
                         )
                         drawn_resources.append(node_connection)
@@ -213,12 +211,13 @@ def handle_nodes(
 
                 # Create edge connection if node was drawn
                 if connectedNode:
-                    label = get_edge_labels(newNode, connectedNode, tfdata)
+                    label = get_edge_labels(newNode, connectedNode, tfdata, provider_config)
 
                     # Determine origin node for connection
                     if (
                         not tfdata["connected_nodes"].get(newNode._id)
-                        and tfdata["meta_data"][resource]["node"]
+                        and tfdata["meta_data"][resource]
+                        and tfdata["meta_data"][resource].get("node") # Ensure "node" key exists
                     ):
                         originNode = tfdata["meta_data"][resource]["node"]
                     else:
@@ -231,12 +230,12 @@ def handle_nodes(
                         originNode._id
                     ):
                         if originNode != connectedNode and ok_to_connect(
-                            resource_type, node_type
+                            resource_type, node_type, provider_config
                         ):
                             # Determine edge visibility
                             line_style = (
                                 "solid"
-                                if always_draw_edge(resource_type, node_type, tfdata)
+                                if always_draw_edge(resource_type, node_type, tfdata, provider_config)
                                 else "invis"
                             )
                             originNode.connect(
@@ -252,11 +251,10 @@ def handle_nodes(
                                     connectedNode._id,
                                 )
                             )
-
     return newNode, drawn_resources
 
 
-def always_draw_edge(origin: str, destination: str, tfdata: Dict[str, Any]) -> bool:
+def always_draw_edge(origin: str, destination: str, tfdata: Dict[str, Any], provider_config: ProviderConfig) -> bool:
     """Determine if an edge should be visible in the diagram.
 
     Controls edge visibility based on configuration rules. By default, edges
@@ -266,16 +264,18 @@ def always_draw_edge(origin: str, destination: str, tfdata: Dict[str, Any]) -> b
         origin: Origin resource type
         destination: Destination resource type
         tfdata: Terraform data dictionary
+        provider_config: The primary provider configuration
 
     Returns:
         True if edge should be visible (solid), False for invisible edge
     """
+    NEVER_DRAW_LINE = provider_config["config"]["NEVER_DRAW_LINE"]
     if origin in NEVER_DRAW_LINE:
         return False
     return True
 
 
-def ok_to_connect(origin: str, destination: str) -> bool:
+def ok_to_connect(origin: str, destination: str, provider_config: ProviderConfig) -> bool:
     """Determine if a connection should be created between two nodes.
 
     Prevents connections to/from shared services unless explicitly allowed,
@@ -284,10 +284,13 @@ def ok_to_connect(origin: str, destination: str) -> bool:
     Args:
         origin: Origin resource type
         destination: Destination resource type
+        provider_config: The primary provider configuration
 
     Returns:
         True if connection is allowed, False otherwise
     """
+    SHARED_SERVICES = provider_config["config"]["SHARED_SERVICES"]
+    ALWAYS_DRAW_LINE = provider_config["config"]["ALWAYS_DRAW_LINE"]
     if (
         origin in SHARED_SERVICES
         or destination in SHARED_SERVICES
@@ -305,6 +308,8 @@ def handle_group(
     resource: str,
     tfdata: Dict[str, Any],
     drawn_resources: List[str],
+    avl_classes: List[str],
+    provider_config: ProviderConfig,
 ) -> Tuple[Cluster, List[str]]:
     """Recursively draw groups, subgroups, and their contained nodes.
 
@@ -318,18 +323,26 @@ def handle_group(
         resource: Terraform resource name for the group
         tfdata: Terraform data dictionary with graphdict and meta_data
         drawn_resources: List of already drawn resource names
+        avl_classes: List of available resource class names
+        provider_config: The primary provider configuration
 
     Returns:
         Tuple of (created Cluster object, updated drawn_resources list)
     """
+    OUTER_NODES = provider_config["config"]["OUTER_NODES"]
+    GROUP_NODES = provider_config["config"]["GROUP_NODES"]
+
     resource_type = helpers.get_no_module_name(resource).split(".")[0]
     if resource_type not in avl_classes:
-        return
+        return None, drawn_resources # Return None if class is not available
 
     # Create new group/cluster
-    newGroup = getattr(sys.modules[__name__], resource_type)(
-        label=helpers.pretty_name(resource)
+    newGroup = globals().get(resource_type)(
+        label=helpers.pretty_name(resource, provider_config=provider_config)
     )
+    if not newGroup: # Fallback to generic Cluster if specific class not found
+        newGroup = Cluster(label=helpers.pretty_name(resource, provider_config=provider_config))
+
     targetGroup = diagramCanvas if resource_type in OUTER_NODES else inGroup
     targetGroup.subgraph(newGroup.dot)
     drawn_resources.append(resource)
@@ -348,8 +361,11 @@ def handle_group(
                     node_connection,
                     tfdata,
                     drawn_resources,
+                    avl_classes,
+                    provider_config,
                 )
-                newGroup.subgraph(subGroup.dot)
+                if subGroup: # Only add if subGroup was successfully created
+                    newGroup.subgraph(subGroup.dot)
                 drawn_resources.append(node_connection)
 
             # Handle regular nodes within the group
@@ -366,10 +382,13 @@ def handle_group(
                     diagramCanvas,
                     tfdata,
                     drawn_resources,
+                    avl_classes,
+                    provider_config,
                 )
-                newGroup.add_node(
-                    newNode._id, label=helpers.pretty_name(node_connection)
-                )
+                if newNode: # Only add if newNode was successfully created
+                    newGroup.add_node(
+                        newNode._id, label=helpers.pretty_name(node_connection, provider_config=provider_config)
+                    )
 
     return newGroup, drawn_resources
 
@@ -380,6 +399,8 @@ def draw_objects(
     tfdata: Dict[str, Any],
     diagramCanvas: Canvas,
     cloudGroup: Cluster,
+    avl_classes: List[str],
+    provider_config: ProviderConfig,
 ) -> List[str]:
     """Iterate through resources and draw groups or nodes based on type.
 
@@ -392,10 +413,15 @@ def draw_objects(
         tfdata: Terraform data dictionary with graphdict
         diagramCanvas: Root canvas object for the diagram
         cloudGroup: Main cloud provider cluster
+        avl_classes: List of available resource class names
+        provider_config: The primary provider configuration
 
     Returns:
         Updated list of drawn resource names
     """
+    OUTER_NODES = provider_config["config"]["OUTER_NODES"]
+    GROUP_NODES = provider_config["config"]["GROUP_NODES"]
+
     for node_type in node_type_list:
         # Extract node type string from dict or use directly
         if isinstance(node_type, dict):
@@ -422,8 +448,11 @@ def draw_objects(
                         resource,
                         tfdata,
                         all_drawn_resources_list,
+                        avl_classes,
+                        provider_config,
                     )
-                    targetGroup.subgraph(node_groups.dot)
+                    if node_groups: # Only add if node_groups was successfully created
+                        targetGroup.subgraph(node_groups.dot)
 
                 # Draw standalone node resources
                 elif (
@@ -438,6 +467,8 @@ def draw_objects(
                         diagramCanvas,
                         tfdata,
                         all_drawn_resources_list,
+                        avl_classes,
+                        provider_config,
                     )
 
     return all_drawn_resources_list
@@ -450,6 +481,7 @@ def render_diagram(
     outfile: str,
     format: str,
     source: str,
+    provider_config: ProviderConfig,
 ) -> None:
     """Main control function for rendering the architecture diagram.
 
@@ -463,10 +495,50 @@ def render_diagram(
         outfile: Output filename without extension
         format: Output format (png, svg, pdf, bmp)
         source: Source path or URL for footer attribution
+        provider_config: The primary provider configuration
 
     Returns:
         None (generates diagram file as side effect)
     """
+    DRAW_ORDER = provider_config["config"]["DRAW_ORDER"]
+    OUTER_NODES = provider_config["config"]["OUTER_NODES"]
+
+    # Dynamically populate avl_classes for the current provider
+    # For Epic 1, this remains AWS-focused for now
+    # This will be refactored in Epic 4 to dynamically load based on provider_config
+    # For now, we manually import aws classes and populate avl_classes from there
+    aws_resource_classes_modules = [
+        "resource_classes.aws.analytics", "resource_classes.aws.ar",
+        "resource_classes.aws.blockchain", "resource_classes.aws.business",
+        "resource_classes.aws.compute", "resource_classes.aws.cost",
+        "resource_classes.aws.database", "resource_classes.aws.devtools",
+        "resource_classes.aws.enablement", "resource_classes.aws.enduser",
+        "resource_classes.aws.engagement", "resource_classes.aws.game",
+        "resource_classes.aws.general", "resource_classes.aws.groups",
+        "resource_classes.aws.integration", "resource_classes.aws.iot",
+        "resource_classes.aws.management", "resource_classes.aws.media",
+        "resource_classes.aws.migration", "resource_classes.aws.ml",
+        "resource_classes.aws.mobile", "resource_classes.aws.network",
+        "resource_classes.aws.quantum", "resource_classes.aws.robotics",
+        "resource_classes.aws.satellite", "resource_classes.aws.security",
+        "resource_classes.aws.storage", "resource_classes.generic.blank"
+    ]
+    
+    # Import all classes from resource_classes.aws.groups into the current globals()
+    # This is a temporary measure for Epic 1 to ensure existing AWS classes are available
+    # A more robust dynamic import will be done in Epic 4
+    for mod_name in aws_resource_classes_modules:
+        try:
+            module = __import__(mod_name, fromlist=["*"])
+            for name, obj in inspect.getmembers(module):
+                if inspect.isclass(obj) and issubclass(obj, Node):
+                    globals()[name] = obj
+        except ImportError:
+            click.echo(f"Warning: Could not import module {mod_name}")
+
+    avl_classes = [name for name, obj in inspect.getmembers(sys.modules[__name__]) if inspect.isclass(obj) and (issubclass(obj, Node) or issubclass(obj, Cluster)) and obj.__module__.startswith("resource_classes")]
+    avl_classes_names = [cls.__name__ for cls in avl_classes] # Get just the names
+
     # Track already drawn resources to prevent duplicates
     all_drawn_resources_list = list()
 
@@ -482,7 +554,7 @@ def render_diagram(
     setdiagram(myDiagram)
 
     # Create main cloud provider boundary
-    cloudGroup = AWSgroup()
+    cloudGroup = AWSgroup() # Keep AWSgroup for now; will be dynamic in Epic 4
     setcluster(cloudGroup)
     tfdata["connected_nodes"] = dict()
 
@@ -494,7 +566,7 @@ def render_diagram(
             targetGroup = myDiagram
         setcluster(targetGroup)
         all_drawn_resources_list = draw_objects(
-            node_type_list, all_drawn_resources_list, tfdata, myDiagram, cloudGroup
+            node_type_list, all_drawn_resources_list, tfdata, myDiagram, cloudGroup, avl_classes_names, provider_config
         )
 
     # Add footer with metadata
